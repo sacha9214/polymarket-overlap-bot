@@ -19,7 +19,27 @@ porté à l'identique dans `overlap.py`.
 
 `/watch` et `/unwatch` sont réservées aux membres qui peuvent gérer le serveur.
 
-## Mise en route
+## Deux façons de l'utiliser
+
+| | Webhook seul | Bot complet |
+|---|---|---|
+| Mise en route | ~30 s, aucun jeton | création d'une application Discord |
+| Alertes entrées/sorties | ✅ | ✅ |
+| Commandes `/best`, `/wallet`… | ❌ | ✅ |
+| Lancement | `./start_webhook.sh` | `./start_mac_linux.sh` |
+
+### Version webhook (la plus simple)
+
+Un webhook ne sait qu'**envoyer** des messages — ce qui suffit pour les alertes.
+
+1. Discord → **Paramètres du serveur** → **Intégrations** → **Webhooks** → *Nouveau webhook*
+2. Choisis le salon, puis **Copier l'URL du webhook**
+3. Colle-la dans un fichier `webhook.txt` à côté des scripts (il est gitignoré)
+4. `./start_webhook.sh`
+
+Cette URL permet de publier dans ton salon : garde-la pour toi.
+
+## Mise en route du bot complet
 
 1. **Créer le bot** sur <https://discord.com/developers/applications> → *New Application* → onglet *Bot* → *Reset Token* → copier le jeton.
 2. **Coller le jeton** dans un fichier `token.txt` à côté de `bot.py` (une seule ligne).
