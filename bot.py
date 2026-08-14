@@ -27,6 +27,7 @@ import asyncio
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -118,6 +119,66 @@ db.execute("""CREATE TABLE IF NOT EXISTS board(
 # traduction : le guide français continuait de s'afficher).
 db.execute("""CREATE TABLE IF NOT EXISTS guides(
   channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
+
+# Salons retenus par IDENTIFIANT, pas par nom : un identifiant survit aux
+# renommages, un nom non. Sans ça, renommer « buy-alerts » en « buy-alerts🚨 »
+# fait que /setup ne le reconnaît plus et en recrée un doublon à côté.
+db.execute("""CREATE TABLE IF NOT EXISTS channels(
+  guild_id INTEGER, key TEXT, channel_id INTEGER,
+  PRIMARY KEY(guild_id, key))""")
+db.commit()
+
+
+def _norm(name):
+    """Nom comparable : emojis, majuscules et ponctuation retirés."""
+    return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+
+
+def seed_channels_from_legacy(guild):
+    """Récupère la correspondance depuis les tables déjà remplies.
+
+    Les salons de ce serveur ont été renommés avant l'existence de la table
+    `channels` : ni l'ID ni le nom ne permettent de les retrouver. Mais on sait
+    déjà où vivent le guide, le tableau et les deux flux — c'est écrit dans
+    `guides`, `board` et `feeds`. On s'en sert pour reconstituer la table.
+    """
+    known = {}
+    r = db.execute("SELECT channel_id FROM guides").fetchone()
+    if r: known["how-it-works"] = r[0]
+    r = db.execute("SELECT channel_id FROM board").fetchone()
+    if r: known["best-overlaps"] = r[0]
+    for kind, key in (("buys", "buy-alerts"), ("exits", "exit-alerts")):
+        r = db.execute("SELECT channel_id FROM feeds WHERE kind=?", (kind,)).fetchone()
+        if r: known[key] = r[0]
+    for key, cid in known.items():
+        if guild.get_channel(cid) is not None:
+            db.execute("INSERT OR IGNORE INTO channels VALUES(?,?,?)",
+                       (guild.id, key, cid))
+    db.commit()
+
+
+async def ensure_channel(guild, cat, key, display, topic, overwrites):
+    """Retrouve un salon par ID mémorisé, puis par nom normalisé, sinon le crée."""
+    row = db.execute("SELECT channel_id FROM channels WHERE guild_id=? AND key=?",
+                     (guild.id, key)).fetchone()
+    if row:
+        ch = guild.get_channel(row[0])
+        if ch is not None:
+            return ch, False
+
+    target = _norm(key)
+    for ch in cat.text_channels:
+        if _norm(ch.name) == target:
+            db.execute("INSERT OR REPLACE INTO channels VALUES(?,?,?)",
+                       (guild.id, key, ch.id))
+            db.commit()
+            return ch, False
+
+    ch = await guild.create_text_channel(display, category=cat, topic=topic,
+                                         overwrites=overwrites)
+    db.execute("INSERT OR REPLACE INTO channels VALUES(?,?,?)", (guild.id, key, ch.id))
+    db.commit()
+    return ch, True
 db.commit()
 
 
@@ -710,29 +771,41 @@ async def setup(ctx):
         me: discord.PermissionOverwrite(send_messages=True, manage_messages=True),
     }
 
+    # (clé logique, nom affiché à la création, sujet, lecture seule)
+    # La clé identifie le salon en base et ne change jamais ; le nom affiché est
+    # libre, tu peux le renommer sans que /setup fasse des doublons.
     plan = [
-        ("how-it-works", "Read this first — what an overlap is and how to read the alerts", True),
-        ("best-overlaps", "Live ranking of the best overlaps, rewritten automatically", True),
-        ("buy-alerts", "Smart money OPENING a position (verdict BUY)", True),
-        ("exit-alerts", "Smart money CLOSING a position — as telling as a buy", True),
-        ("discussion", "Talk about the calls here — this one is open to everyone", False),
+        ("how-it-works", "📖overlap-guide",
+         "Read this first — what an overlap is and how to read the alerts", True),
+        ("best-overlaps", "📈best-overlaps",
+         "Live ranking of the best overlaps, rewritten automatically", True),
+        ("buy-alerts", "🚨buy-alerts", "Smart money OPENING a position (verdict BUY)", True),
+        ("exit-alerts", "🔻exit-alerts", "Smart money CLOSING a position — as telling as a buy", True),
+        ("discussion", "💬overlap-discussion", "Talk about the calls here — this one is open to everyone", False),
     ]
 
     cat = discord.utils.get(g.categories, name="POLYMARKET OVERLAP")
     if cat is None:
         cat = await g.create_category("POLYMARKET OVERLAP")
 
+    seed_channels_from_legacy(g)
+
     made, reused, chans = [], [], {}
-    for name, topic, locked in plan:
-        ch = discord.utils.get(g.text_channels, name=name)
-        if ch is None:
-            ch = await g.create_text_channel(
-                name, category=cat, topic=topic,
-                overwrites=read_only if locked else None)
-            made.append(ch)
-        else:
-            reused.append(ch)
-        chans[name] = ch
+    for key, display, topic, locked in plan:
+        try:
+            ch, created = await ensure_channel(
+                g, cat, key, display, topic,
+                # py-cord EXIGE un dict : `None` lève InvalidArgument et faisait
+                # échouer toute la commande sur « discussion », le seul salon
+                # ouvert — d'où un salon manquant sans message d'erreur visible.
+                read_only if locked else {})
+        except discord.HTTPException as e:
+            return await ctx.respond(
+                f"Could not create **{display}**: {e}\n"
+                "Run `/setup` again once fixed — existing channels are reused.",
+                ephemeral=True)
+        (made if created else reused).append(ch)
+        chans[key] = ch
 
     # Guide épinglé
     guide_ch = chans["how-it-works"]
