@@ -19,6 +19,7 @@ ou dans la variable d'environnement DISCORD_BOT_TOKEN. Ne le partage jamais.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import time
@@ -58,6 +59,13 @@ db.execute("""CREATE TABLE IF NOT EXISTS subs(
   min_value REAL DEFAULT 10000, created INTEGER)""")
 db.execute("""CREATE TABLE IF NOT EXISTS seen(
   key TEXT PRIMARY KEY, title TEXT, outcome TEXT, value REAL, ts INTEGER)""")
+# Qui détient quoi, wallet par wallet. Indispensable : le preset suit le top 50 de la
+# semaine, et un trader qui SORT du classement emporte toutes ses positions avec lui.
+# Comparer seulement les marchés agrégés faisait passer ce renouvellement pour des
+# liquidations massives (151 fausses « sorties » mesurées sur un seul cycle).
+db.execute("""CREATE TABLE IF NOT EXISTS holdings(
+  addr TEXT, key TEXT, title TEXT, outcome TEXT, value REAL, ts INTEGER,
+  PRIMARY KEY(addr, key))""")
 db.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
 db.commit()
 
@@ -137,41 +145,96 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
 # ---------------------------------------------------------------------------
 # Surveillance
 # ---------------------------------------------------------------------------
+def compute_deltas(prev_hold: dict, cur_hold: dict, current: dict,
+                   prev_addrs: set | None = None, cur_addrs: set | None = None):
+    """Vrais mouvements entre deux passages.
+
+    Seuls les traders présents AVANT et MAINTENANT sont comparés : le preset suit le
+    top 50 de la semaine, donc un trader qui quitte le classement emporte toutes ses
+    positions. Les compter comme des ventes produisait des sorties fictives en masse.
+    """
+    # On compare les traders réellement ANALYSÉS aux deux passages, pas seulement ceux
+    # qui avaient déjà une position commune : sinon un trader dont la position devient
+    # tout juste partagée par un second wallet ne déclencherait jamais d'alerte.
+    prev_set = prev_addrs if prev_addrs is not None else set(prev_hold)
+    cur_set  = cur_addrs  if cur_addrs  is not None else set(cur_hold)
+    common = prev_set & cur_set
+    opened, closed = set(), {}
+    for a in common:
+        before, after = prev_hold.get(a, {}), cur_hold.get(a, {})
+        for k in after.keys() - before.keys():
+            opened.add(k)
+        for k in before.keys() - after.keys():
+            title, outcome, value = before[k]
+            agg = closed.setdefault(k, [title, outcome, 0.0])
+            agg[2] += value or 0
+    entries = [current[k] for k in opened
+               if k in current and ov.verdict(current[k])[0] == "buy"]
+    # Une position encore tenue par d'autres traders suivis n'est pas une sortie du groupe.
+    exits = [(k, t, o, v) for k, (t, o, v) in closed.items() if k not in current]
+    return entries, exits
+
+
 @tasks.loop(minutes=POLL_MINUTES)
 async def watcher():
     subs = db.execute("SELECT channel_id, min_value FROM subs").fetchall()
     if not subs:
         return
     try:
-        _, markets = await get_analysis(force=True)
+        wallets, markets = await get_analysis(force=True)
     except Exception as exc:
         print("watcher: analyse impossible —", exc)
         return
 
     now = int(time.time())
-    prev = {r[0]: r for r in db.execute("SELECT key, title, outcome, value FROM seen")}
     current = {m["key"]: m for m in markets}
 
-    # Premier passage : on enregistre l'état sans rien annoncer, sinon 200 alertes d'un coup.
-    first_run = meta_get("initialised") is None
+    # État précédent, wallet par wallet.
+    prev_hold: dict[str, dict[str, tuple]] = {}
+    for addr, key, title, outcome, value in db.execute(
+            "SELECT addr, key, title, outcome, value FROM holdings"):
+        prev_hold.setdefault(addr, {})[key] = (title, outcome, value)
 
-    entries, exits = [], []
-    if not first_run:
-        entries = [m for k, m in current.items()
-                   if k not in prev and ov.verdict(m)[0] == "buy"]
-        exits = [prev[k] for k in prev if k not in current]
+    # État courant, wallet par wallet.
+    cur_hold: dict[str, dict[str, tuple]] = {}
+    for m in markets:
+        for h in m["holders"]:
+            a = h["wallet"].addr.lower()
+            cur_hold.setdefault(a, {})[m["key"]] = (m["title"], m["outcome"], h["value"])
+
+    cur_addrs = {w.addr.lower() for w in wallets}
+    try:
+        prev_addrs = set(json.loads(meta_get("addrs") or "[]"))
+    except ValueError:
+        prev_addrs = set()
+
+    first_run = meta_get("initialised") is None
+    entries, exits = ([], []) if first_run else compute_deltas(
+        prev_hold, cur_hold, current, prev_addrs, cur_addrs)
 
     db.execute("DELETE FROM seen")
     db.executemany("INSERT INTO seen VALUES(?,?,?,?,?)",
                    [(m["key"], m["title"], m["outcome"], m["totalValue"], now)
                     for m in markets])
+    db.execute("DELETE FROM holdings")
+    db.executemany("INSERT INTO holdings VALUES(?,?,?,?,?,?)",
+                   [(a, k, t, o, v, now)
+                    for a, ks in cur_hold.items() for k, (t, o, v) in ks.items()])
+    meta_set("addrs", json.dumps(sorted(cur_addrs)))
     meta_set("initialised", "1")
     meta_set("last_run", now)
     db.commit()
 
     if first_run:
-        print(f"watcher: état initial enregistré ({len(markets)} marchés), aucune alerte envoyée.")
+        print(f"watcher: état initial enregistré ({len(markets)} marchés, "
+              f"{len(cur_addrs)} wallets), aucune alerte envoyée.")
         return
+
+    stamp = time.strftime("%H:%M:%S")
+    churn = len(cur_addrs - prev_addrs) + len(prev_addrs - cur_addrs)
+    print(f"watcher {stamp}: {len(markets)} marchés · {len(cur_addrs)} wallets "
+          f"({churn} changements de classement ignorés) → "
+          f"{len(entries)} entrée(s) ACHETER, {len(exits)} sortie(s)")
 
     for channel_id, min_value in subs:
         ch = bot.get_channel(channel_id)
@@ -185,14 +248,16 @@ async def watcher():
             except Exception as exc:
                 print("watcher: envoi impossible —", exc)
 
-        big_exits = [x for x in exits if (x[3] or 0) >= (min_value or 0)]
+        big_exits = sorted((x for x in exits if (x[3] or 0) >= (min_value or 0)),
+                           key=lambda x: -(x[3] or 0))
         if big_exits:
             txt = "\n".join(f"• **{x[1]}** — « {ov.outcome_label(x[1], x[2])} » "
                             f"(valait {ov.fmt_usd(x[3] or 0)})" for x in big_exits[:5])
             e = discord.Embed(
                 title="🚪 Sorties — ils ont liquidé ces positions",
                 description=txt[:3800], colour=RED)
-            e.set_footer(text="Une sortie est un signal au moins aussi fort qu'une entrée.")
+            e.set_footer(text="Sorties de traders encore suivis — pas un simple "
+                              "changement de classement. Un abandon vaut un achat.")
             try:
                 await ch.send(embed=e)
             except Exception as exc:
@@ -207,6 +272,13 @@ async def _before():
 @bot.event
 async def on_ready():
     print(f"Connecté : {bot.user} · surveillance toutes les {POLL_MINUTES} min")
+    # L'identifiant d'un bot EST l'Application ID : il peut donc afficher son propre
+    # lien d'invitation, sans qu'on ait à retourner chercher quoi que ce soit.
+    # Permissions 18432 = Send Messages (2048) + Embed Links (16384).
+    print("Lien d'invitation : "
+          f"https://discord.com/oauth2/authorize?client_id={bot.user.id}"
+          "&permissions=18432&scope=bot%20applications.commands")
+    print(f"Serveurs : {[g.name for g in bot.guilds] or 'aucun — utilise le lien ci-dessus'}")
     if not watcher.is_running():
         watcher.start()
 
