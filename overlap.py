@@ -10,6 +10,7 @@ Source des données : APIs publiques Polymarket (aucune clé nécessaire).
 from __future__ import annotations
 
 import asyncio
+import datetime
 import math
 import re
 import time
@@ -38,15 +39,26 @@ def fmt_usd(v: float) -> str:
     return f"${v:.0f}"
 
 
-def days_left(end: str | None) -> float | None:
-    if not end:
+def _parse_date(value: str | None) -> datetime.datetime | None:
+    """L'API renvoie tantôt « 2026-11-03T00:00:00Z », tantôt « 2026-11-03 » tout court.
+    Sans fuseau, la comparaison avec un datetime aware lève une exception : la date
+    nue était donc rejetée pour TOUS les marchés, ce qui annulait silencieusement la
+    pondération par échéance du classement."""
+    if not value:
         return None
     try:
-        from datetime import datetime, timezone
-        dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-        return math.ceil((dt - datetime.now(timezone.utc)).total_seconds() / 86400)
-    except Exception:
+        dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
         return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+
+def days_left(end: str | None) -> float | None:
+    dt = _parse_date(end)
+    if dt is None:
+        return None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return math.ceil((dt - now).total_seconds() / 86400)
 
 
 def outcome_label(title: str, outcome: str) -> str:
@@ -56,6 +68,28 @@ def outcome_label(title: str, outcome: str) -> str:
     if m and re.fullmatch(r"over|under", o, re.I):
         return f"{o} {m.group(1)}"
     return o
+
+
+def explain_outcome(title: str, outcome: str) -> str:
+    """« Over » n'est pas une équipe : c'est un pari sur le TOTAL de points du match."""
+    t, o = title or "", (outcome or "").strip()
+    m = re.search(r"O/U\s*([\d.]+)", t, re.I) or re.search(r"(?:Over/Under|Total)\s*([\d.]+)", t, re.I)
+    line = m.group(1) if m else None
+    if re.fullmatch(r"over", o, re.I):
+        return (f"total du match **supérieur à {line}** (soit {math.ceil(float(line))} ou plus, "
+                f"les deux équipes confondues)" if line else "total du match au-dessus de la ligne")
+    if re.fullmatch(r"under", o, re.I):
+        return (f"total du match **inférieur à {line}** (soit {math.floor(float(line))} ou moins, "
+                f"les deux équipes confondues)" if line else "total du match en dessous de la ligne")
+    if re.search(r"spread|handicap", t, re.I):
+        sp = re.search(r"([+-]?\d+(?:[.,]\d+)?)\s*\)?\s*$", t) or re.search(r"([+-]\d+(?:[.,]\d+)?)", t)
+        return (f"{o} l'emporte avec le handicap {sp.group(1)} appliqué à son score"
+                if sp else f"{o} l'emporte handicap appliqué")
+    if re.fullmatch(r"yes", o, re.I):
+        return "la question du titre se réalise"
+    if re.fullmatch(r"no", o, re.I):
+        return "la question du titre ne se réalise pas"
+    return f"victoire de {o}"
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +132,12 @@ class TrackRecord:
     last_buy: dict = field(default_factory=dict)
 
 
+def _end_ts(value: str | None) -> float | None:
+    """Date de résolution d'un marché en timestamp UTC, ou None si absente/illisible."""
+    dt = _parse_date(value)
+    return dt.timestamp() if dt else None
+
+
 def track_record(activity: list, positions: list) -> TrackRecord:
     """
     La plus-value latente n'est PAS un palmarès. On reconstruit les paris réellement
@@ -128,25 +168,57 @@ def track_record(activity: list, positions: list) -> TrackRecord:
             a["proceeds"] += e.get("usdcSize") or 0
 
     tr = TrackRecord()
+    settled: set[str] = set()          # paris RÉSOLUS pendant la fenêtre, gagnés ou perdus
     for key, a in by_asset.items():
         if a["last_buy"]:
             tr.last_buy[key] = a["last_buy"]
-        # On ne score que les paris ouverts ET refermés dans la fenêtre observée.
+        # Aller-retour complet observé : on connaît le coût, donc le gain réel.
         if a["bought"] > 0 and a["out"] >= a["bought"] * 0.98:
             pnl = a["proceeds"] - a["cost"]
             tr.trades += 1
             tr.wins += 1 if pnl > 0 else 0
             tr.realized += pnl
+            settled.add(key)
 
+    # Les gains ne sont visibles que dans la fenêtre de /activity (plafonnée à 500
+    # événements — parfois quelques HEURES chez un gros trader), alors que les positions
+    # perdantes s'accumulent indéfiniment dans le portefeuille. Compter toutes les pertes
+    # face aux seuls gains récents écrasait le palmarès : mesuré sur wr0ngw4yb3tt0r,
+    # 488 pertes retenues dont 7 seulement dans la fenêtre → « 3 % de réussite, −11 M$ »
+    # pour un trader à +407 K$ sur la semaine. On ne garde donc que les pertes datées
+    # de la même période.
     for p in positions or []:
         if p.get("redeemable") is not True:
             continue
         won = (p.get("currentValue") or 0) >= 0.01
         if not won and (p.get("initialValue") or 0) <= 1:
             continue                                   # poussière, pas un vrai pari
+        if oldest is not math.inf:
+            end = _end_ts(p.get("endDate"))
+            if end is None or end < oldest:
+                continue                               # résolu hors fenêtre observée
+        key = f"{p.get('conditionId')}|{p.get('outcome')}"
+        if key in settled:
+            continue                                   # déjà compté via l'historique
+        settled.add(key)
         tr.trades += 1
         tr.wins += 1 if won else 0
         tr.realized += p.get("cashPnl") or 0
+
+    # Un pari GAGNÉ aujourd'hui mais acheté AVANT la fenêtre n'a pas d'achat observable :
+    # il échouait au test de l'aller-retour et n'était jamais compté, alors que son
+    # équivalent perdant l'était (il dort dans le portefeuille). D'où des « 0 % de
+    # réussite » chez des traders parmi les plus rentables de la semaine. On rattrape
+    # ces victoires par leurs remboursements, sans toucher au PnL (le coût est inconnu).
+    for e in activity or []:
+        if e.get("type") != "REDEEM" or (e.get("usdcSize") or 0) <= 1:
+            continue
+        key = f"{e.get('conditionId')}|{e.get('outcome')}"
+        if key in settled:
+            continue
+        settled.add(key)
+        tr.trades += 1
+        tr.wins += 1
 
     tr.win_rate = (tr.wins / tr.trades) if tr.trades else None
     tr.days = None if oldest is math.inf else max(1, round((time.time() - oldest) / 86400))
@@ -154,17 +226,29 @@ def track_record(activity: list, positions: list) -> TrackRecord:
 
 
 def wallet_quality(tr: TrackRecord | None, lb: dict | None) -> float:
-    """Qualité dans [-1,1] : palmarès réel d'abord, leaderboard ensuite, sinon neutre."""
-    if tr and tr.trades >= 5:
+    """Qualité dans [-1,1].
+
+    L'argent vient du classement (PnL de la semaine, complet et fiable) ; le taux de
+    réussite vient des paris résolus pendant la fenêtre observée. Utiliser le PnL
+    reconstruit à la place donnait des résultats absurdes : son coût n'est connu que
+    pour les allers-retours entièrement visibles, soit quelques heures d'historique
+    chez les traders les plus actifs.
+    """
+    lb_pnl = (lb or {}).get("pnl")
+    profit = None
+    if lb_pnl is not None:
+        sign = 1 if lb_pnl > 0 else (-1 if lb_pnl < 0 else 0)
+        profit = clamp(sign * min(1, math.log10(1 + abs(lb_pnl)) / 6), -1, 1)
+    elif tr and tr.trades >= 5:
         profit = math.tanh(tr.realized / 20000)
+
+    if tr and tr.trades >= 5 and tr.win_rate is not None:
         skill = (tr.win_rate - 0.5) * 2
         conf = min(1, tr.trades / 15)
-        return clamp((0.6 * profit + 0.4 * skill) * conf, -1, 1)
-    if lb:
-        pnl = lb.get("pnl") or 0
-        sign = 1 if pnl > 0 else (-1 if pnl < 0 else 0)
-        return clamp(sign * min(1, math.log10(1 + abs(pnl)) / 6), -1, 1)
-    return 0.0                                        # jamais la plus-value latente
+        if profit is None:
+            return clamp(skill * conf, -1, 1)
+        return clamp(profit * (1 - 0.4 * conf) + skill * 0.4 * conf, -1, 1)
+    return clamp(profit, -1, 1) if profit is not None else 0.0
 
 
 @dataclass
@@ -184,10 +268,14 @@ class Wallet:
         return self.tr.last_buy if self.tr else {}
 
     def record_str(self) -> str:
+        # Le PnL de la semaine vient du classement (fiable) ; le taux de réussite du
+        # sous-ensemble de paris résolus pendant la fenêtre d'historique observable.
         if self.tr and self.tr.trades >= 5:
-            sign = "+" if self.tr.realized >= 0 else "−"
-            return (f"{round(self.tr.win_rate*100)}% de réussite · "
-                    f"{sign}{fmt_usd(abs(self.tr.realized))} sur {self.tr.trades} paris")
+            base = f"{round(self.tr.win_rate*100)}% de réussite sur {self.tr.trades} paris résolus"
+            if self.lb and self.lb.get("pnl") is not None:
+                pnl = self.lb["pnl"]
+                return f"{'+' if pnl>=0 else '−'}{fmt_usd(abs(pnl))} cette semaine · {base}"
+            return base
         if self.lb:
             pnl = self.lb.get("pnl") or 0
             return f"{'+' if pnl>=0 else '−'}{fmt_usd(abs(pnl))} (classement)"
@@ -317,7 +405,11 @@ def metrics(m: dict) -> dict:
     m["ev"] = ev
     m["evTime"] = ev / max(0.5, (d if d and d > 0 else 90) / 30)
     m["daysLeft"] = d
-    m["contested"] = any(o["n"] > 0 for o in m.get("others", []))
+    # Un désaccord signalé dès 1 $ en face se déclenchait presque toujours et ne voulait
+    # plus rien dire. On exige que le camp adverse pèse vraiment : au moins 10 % de
+    # l'argent de ce côté (et plus que de la poussière).
+    m["contested"] = any(o["value"] >= max(100, 0.10 * (m.get("totalValue") or 0))
+                         for o in m.get("others", []))
     return m
 
 

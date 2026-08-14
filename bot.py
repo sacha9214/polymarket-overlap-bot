@@ -45,7 +45,7 @@ GUILDS = [GUILD_ID] if GUILD_ID else None
 
 DB_PATH = Path(__file__).with_name("overlap.db")
 POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "20"))
-PRESET_SIZE = int(os.environ.get("PRESET_SIZE", "40"))
+PRESET_SIZE = int(os.environ.get("PRESET_SIZE", "50"))   # top 50 de la semaine
 DEFAULT_MIN_VALUE = 10_000     # n'alerte pas pour des miettes
 
 GREEN, RED, GREY, GOLD = 0x22C55E, 0xEF4444, 0x8B93A1, 0xEAB308
@@ -67,6 +67,10 @@ db.execute("""CREATE TABLE IF NOT EXISTS holdings(
   addr TEXT, key TEXT, title TEXT, outcome TEXT, value REAL, ts INTEGER,
   PRIMARY KEY(addr, key))""")
 db.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
+# Tableau vivant : UN message que le bot réécrit à chaque cycle, pour qu'un salon
+# « meilleur overlap du moment » montre l'état actuel sans avoir à remonter le fil.
+db.execute("""CREATE TABLE IF NOT EXISTS board(
+  channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
 db.commit()
 
 
@@ -107,44 +111,152 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
         colour = GOLD
 
     prefix = {"new": "🆕 Le smart money vient d'entrer", "pick": "🎯"}.get(kind, "")
-    e = discord.Embed(
-        title=f"{prefix} · {label}"[:250],
-        description=f"**{m['title']}**",
-        url=ov.market_url(m), colour=colour,
-    )
-    e.add_field(name="Proba estimée",
-                value=f"**{round(m['myProba']*100)}%** vs marché {round(m['price']*100)}% "
-                      f"({pts:+d} pts)", inline=True)
-    e.add_field(name="Argent engagé",
-                value=f"{ov.fmt_usd(m['totalValue'])} · {len(m['holders'])} traders", inline=True)
-    if m.get("daysLeft") is not None:
-        d = m["daysLeft"]
-        e.add_field(name="Échéance",
-                    value="aujourd'hui" if d <= 0 else ("demain" if d == 1 else f"dans {d} j"),
-                    inline=True)
+    label_out = ov.outcome_label(m["title"], m["outcome"])
 
-    top = sorted(m["holders"], key=lambda h: -h["value"])[:3]
-    e.add_field(
-        name="Qui est dessus",
-        value="\n".join(
-            f"• **{h['wallet'].name}** — {ov.fmt_usd(h['value'])} "
-            f"(entré à {round(h['avg']*100)}¢) · {h['wallet'].record_str()}" for h in top
-        )[:1000] or "—", inline=False)
+    # Même lecture que les cartes du site : le pari et sa traduction, puis le contexte.
+    desc = [f"## {m['title']}",
+            f"**Le pari : `{label_out}`** = {ov.explain_outcome(m['title'], m['outcome'])}."]
+
+    avg_entry = m.get("avgEntry") or 0
+    line = (f"**{len(m['holders'])} traders** ont posé **{ov.fmt_usd(m['totalValue'])}** dessus "
+            f"(entrée moyenne {round(avg_entry*100)}¢, prix actuel {round((m['price'] or 0)*100)}¢).")
+    good = sum(1 for h in m["holders"] if (h["wallet"].quality or 0) > 0)
+    if good == len(m["holders"]):
+        line += " Tous sont gagnants sur leur historique récent."
+    elif good == 0:
+        line += " ⚠️ Aucun n'est gagnant sur son historique récent."
+    else:
+        line += f" {good}/{len(m['holders'])} sont gagnants sur leur historique récent."
+    desc.append(line)
 
     if m.get("contested"):
         opp = [o for o in m["others"] if o["n"] > 0]
-        e.add_field(
-            name="⚔️ Désaccord",
-            value=" · ".join(f"{o['n']} sur « {ov.outcome_label(m['title'], o['outcome'])} » "
-                             f"({ov.fmt_usd(o['value'])})" for o in opp)[:1000], inline=False)
+        opp_val = sum(o["value"] for o in opp)
+        share = round(opp_val / max(1e-9, opp_val + m["totalValue"]) * 100)
+        detail = ", ".join(
+            f"{o['n']} trader{'s' if o['n'] > 1 else ''} parie{'nt' if o['n'] > 1 else ''} "
+            f"**{ov.fmt_usd(o['value'])}** sur « {ov.outcome_label(m['title'], o['outcome'])} »"
+            for o in opp)
+        desc.append(f"> ⚔️ **Le smart money n'est pas d'accord.** {detail} — contre "
+                    f"**{ov.fmt_usd(m['totalValue'])}** de ce côté, soit **{share}%** de "
+                    f"l'argent suivi à contre-courant.")
+
+    if avg_entry and m.get("price") and (m["price"] - avg_entry) > 0.08:
+        desc.append(f"> ⚠️ **Tu arrives après eux.** Ils sont entrés à {round(avg_entry*100)}¢, "
+                    f"le marché est à {round(m['price']*100)}¢.")
+
+    e = discord.Embed(title=f"{prefix} · {label}"[:250],
+                      description="\n\n".join(desc)[:4000],
+                      url=ov.market_url(m), colour=colour)
+
+    e.add_field(name="Proba estimée",
+                value=f"**{round(m['myProba']*100)}%**\nmarché : {round(m['price']*100)}% ({pts:+d})",
+                inline=True)
+    stake = 100
+    gain = stake * (1 - m["price"]) / m["price"] if 0 < (m["price"] or 0) < 1 else 0
+    e.add_field(name="Ta mise de $100 → si gagné",
+                value=f"**+{ov.fmt_usd(gain)}**", inline=True)
+    e.add_field(name="Les wallets visent",
+                value=f"**+{ov.fmt_usd(m.get('potentialGain') or 0)}**", inline=True)
+
+    # Le détail wallet par wallet, comme le panneau dépliable du site.
+    def who(holders, limit=4):
+        rows = []
+        for h in sorted(holders, key=lambda x: -x["value"])[:limit]:
+            w = h["wallet"]
+            invested = (h["shares"] or 0) * (h["avg"] or 0)
+            perf = (h["value"] - invested) / invested if invested > 0 else 0
+            pct = (h["value"] / w.portfolio * 100) if getattr(w, "portfolio", 0) else 0
+            pct_txt = f"{pct:.0f}%" if pct >= 1 else (f"{pct:.1f}%" if pct >= 0.1 else "<0.1%")
+            rows.append(
+                f"**{w.name}**\n"
+                f"💵 {ov.fmt_usd(invested)} à {round((h['avg'] or 0)*100)}¢ → "
+                f"{ov.fmt_usd(h['value'])} ({'+' if perf >= 0 else '−'}{abs(round(perf*100))}%) "
+                f"· {pct_txt} de son portefeuille\n"
+                f"📊 {w.record_str()}")
+        return "\n".join(rows)[:1000] or "—"
+
+    e.add_field(name=f"✅ Pour « {label_out} » — {ov.fmt_usd(m['totalValue'])}",
+                value=who(m["holders"]), inline=False)
+    if m.get("contested"):
+        for o in sorted((o for o in m["others"] if o["n"] > 0), key=lambda o: -o["value"])[:1]:
+            e.add_field(
+                name=f"⚔️ Contre — « {ov.outcome_label(m['title'], o['outcome'])} » — {ov.fmt_usd(o['value'])}",
+                value=who(o["holders"]), inline=False)
+
+    if m.get("daysLeft") is not None:
+        d = m["daysLeft"]
+        when = "résout aujourd'hui" if d <= 0 else ("résout demain" if d == 1 else f"résout dans {d} j")
+    else:
+        when = "échéance inconnue"
+    foot = [when, f"top {PRESET_SIZE} traders de la semaine"]
     if m.get("hasTwins"):
-        e.set_footer(text="⚠️ Des wallets suivis se ressemblent beaucoup — probablement la même personne.")
+        foot.append("⚠️ wallets très similaires — probablement la même personne")
+    e.set_footer(text=" · ".join(foot))
     return e
 
 
 # ---------------------------------------------------------------------------
 # Surveillance
 # ---------------------------------------------------------------------------
+def board_embed(markets: list) -> discord.Embed:
+    """Le classement du moment, lisible d'un coup d'œil, sans jargon."""
+    picks = [m for m in markets if ov.verdict(m)[0] == "buy"]
+    picks.sort(key=lambda m: -m["evTime"])
+    e = discord.Embed(
+        title="🏆 Meilleurs overlaps du moment",
+        description=(
+            "Les marchés où **plusieurs des 50 meilleurs traders de la semaine** ont "
+            "misé du même côté, classés par intérêt. Mis à jour automatiquement.\n"
+            "*Un « overlap » = un pari sur lequel plusieurs bons traders se retrouvent.*"),
+        colour=GOLD)
+    if not picks:
+        e.add_field(name="Rien de convaincant pour l'instant",
+                    value="Aucun marché ne dépasse le seuil. Le tableau se remplira "
+                          "au prochain mouvement — c'est normal et voulu : pas de bruit.",
+                    inline=False)
+    for i, m in enumerate(picks[:5], 1):
+        d = m.get("daysLeft")
+        when = "aujourd'hui" if (d is not None and d <= 0) else (
+               "demain" if d == 1 else (f"dans {d} j" if d is not None else "—"))
+        label = ov.outcome_label(m["title"], m["outcome"])
+        gain = 100 * (1 - m["price"]) / m["price"] if 0 < (m["price"] or 0) < 1 else 0
+        warn = " ⚔️ *avis partagés*" if m.get("contested") else ""
+        e.add_field(
+            name=f"{i}. {m['title'][:80]}",
+            value=(f"**Parier `{label}` à {round(m['price']*100)}¢** — "
+                   f"{ov.explain_outcome(m['title'], m['outcome'])}\n"
+                   f"👥 {len(m['holders'])} traders · 💰 {ov.fmt_usd(m['totalValue'])} engagés · "
+                   f"🎯 proba estimée {round(m['myProba']*100)}% (marché {round(m['price']*100)}%)\n"
+                   f"💵 100 $ misés → **+{ov.fmt_usd(gain)}** si ça passe · ⏳ {when}{warn}\n"
+                   f"[Voir sur Polymarket]({ov.market_url(m)})")[:1020],
+            inline=False)
+    e.set_footer(text=f"Mis à jour toutes les {POLL_MINUTES} min · "
+                      "informatif, pas un conseil financier · /guide pour tout comprendre")
+    e.timestamp = discord.utils.utcnow()
+    return e
+
+
+async def refresh_boards(markets: list):
+    """Réécrit le message du tableau au lieu d'en poster un nouveau."""
+    for channel_id, message_id in db.execute("SELECT channel_id, message_id FROM board").fetchall():
+        ch = bot.get_channel(channel_id)
+        if ch is None:
+            continue
+        embed = board_embed(markets)
+        try:
+            msg = await ch.fetch_message(message_id)
+            await msg.edit(embed=embed)
+        except discord.NotFound:                      # message supprimé → on le recrée
+            msg = await ch.send(embed=embed)
+            db.execute("UPDATE board SET message_id=? WHERE channel_id=?", (msg.id, channel_id))
+        except Exception as exc:
+            print("board: mise à jour impossible —", exc)
+            continue
+        db.execute("UPDATE board SET updated=? WHERE channel_id=?", (int(time.time()), channel_id))
+        db.commit()
+
+
 def compute_deltas(prev_hold: dict, cur_hold: dict, current: dict,
                    prev_addrs: set | None = None, cur_addrs: set | None = None):
     """Vrais mouvements entre deux passages.
@@ -178,7 +290,8 @@ def compute_deltas(prev_hold: dict, cur_hold: dict, current: dict,
 @tasks.loop(minutes=POLL_MINUTES)
 async def watcher():
     subs = db.execute("SELECT channel_id, min_value FROM subs").fetchall()
-    if not subs:
+    boards = db.execute("SELECT channel_id FROM board").fetchall()
+    if not subs and not boards:
         return
     try:
         wallets, markets = await get_analysis(force=True)
@@ -224,6 +337,10 @@ async def watcher():
     meta_set("initialised", "1")
     meta_set("last_run", now)
     db.commit()
+
+    # Le tableau reflète l'état courant : il se met à jour même au tout premier passage,
+    # où aucune alerte n'est envoyée.
+    await refresh_boards(markets)
 
     if first_run:
         print(f"watcher: état initial enregistré ({len(markets)} marchés, "
@@ -364,6 +481,68 @@ async def watch(ctx, seuil: int):
         f"✅ Ce salon recevra les alertes : entrées du smart money au-dessus de "
         f"**{ov.fmt_usd(seuil)}**, et leurs sorties. Vérification toutes les {POLL_MINUTES} min.\n"
         f"_Le premier cycle sert de référence : les alertes commencent au suivant._")
+
+
+@bot.slash_command(name="tableau",
+                   description="Installer ici le tableau des meilleurs overlaps, tenu à jour",
+                   guild_ids=GUILDS)
+async def tableau(ctx):
+    await ctx.defer()
+    _, markets = await get_analysis()
+    msg = await ctx.channel.send(embed=board_embed(markets))
+    try:
+        await msg.pin()
+    except discord.Forbidden:
+        pass                                          # pas la permission d'épingler
+    db.execute("INSERT OR REPLACE INTO board VALUES(?,?,?)",
+               (ctx.channel.id, msg.id, int(time.time())))
+    db.commit()
+    await ctx.respond(
+        f"Tableau installé et épinglé. Il est **réécrit toutes les {POLL_MINUTES} min** "
+        "au même endroit : ce salon montrera toujours l'état actuel, sans fil qui défile.\n"
+        "Pense à `/guide` pour poster le mode d'emploi à épingler aussi.", ephemeral=True)
+
+
+@bot.slash_command(name="guide", description="Poster le mode d'emploi du salon (à épingler)",
+                   guild_ids=GUILDS)
+async def guide(ctx):
+    e = discord.Embed(
+        title="📖 Comment lire ce salon",
+        description="Ce salon suit les **50 meilleurs traders de la semaine** sur Polymarket "
+                    "et repère les paris sur lesquels **plusieurs d'entre eux se retrouvent**.",
+        colour=GOLD)
+    e.add_field(
+        name="1️⃣ C'est quoi un « overlap » ?",
+        value="Un marché où **au moins 2 bons traders ont misé du même côté**. "
+              "Seul, un trader peut se tromper ; quand plusieurs bons convergent, "
+              "ça vaut le coup d'aller regarder.", inline=False)
+    e.add_field(
+        name="2️⃣ Les verdicts",
+        value="🟢 **ACHETER** — les traders suivis voient l'issue plus probable que le marché\n"
+              "⚪ **SUIVRE** — leur avis colle au prix, rien à gagner de spécial\n"
+              "🔴 **ÉVITER** — ceux qui sont dessus perdent d'habitude, ou sont mal entrés\n"
+              "⚔️ **avis partagés** — ils se contredisent entre eux : signal faible", inline=False)
+    e.add_field(
+        name="3️⃣ Les chiffres",
+        value="**Prix en ¢** = la probabilité selon le marché (58¢ ≈ 58 % de chances). "
+              "C'est aussi ton coût : 58¢ misés rapportent 1 $ si tu gagnes.\n"
+              "**Proba estimée** = la même chose corrigée selon *qui* est positionné "
+              "(leur palmarès, la part de portefeuille engagée, leur prix d'entrée).\n"
+              "**100 $ → +X** = ce que rapporteraient 100 $ si le pari passe.", inline=False)
+    e.add_field(
+        name="4️⃣ Over / Under",
+        value="Ce ne sont pas des équipes : c'est le **total de points du match**. "
+              "« Over 8.5 » = 9 points ou plus, les deux équipes confondues. "
+              "Un même match a plusieurs lignes (7.5, 8.5, 9.5…).", inline=False)
+    e.add_field(
+        name="5️⃣ À garder en tête",
+        value="Ces traders **perdent aussi** des paris. Copier n'est pas gagner : ils entrent "
+              "à un prix que tu n'auras plus, et peuvent sortir sans prévenir. "
+              "**Rien ici n'est un conseil financier** — ne mise que ce que tu peux perdre.",
+        inline=False)
+    e.set_footer(text="/tableau installe le classement · /best affiche le top à la demande "
+                      "· /wallet <adresse> analyse un portefeuille")
+    await ctx.respond(embed=e)
 
 
 @bot.slash_command(name="unwatch", description="Désabonner ce salon", guild_ids=GUILDS)
