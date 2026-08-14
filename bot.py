@@ -75,6 +75,11 @@ db.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
 # « meilleur overlap du moment » montre l'état actuel sans avoir à remonter le fil.
 db.execute("""CREATE TABLE IF NOT EXISTS board(
   channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
+# Le mode d'emploi est épinglé : relancer /guide doit RÉÉCRIRE ce message, pas en
+# empiler un second (sinon l'ancienne version reste visible — cas vécu après la
+# traduction : le guide français continuait de s'afficher).
+db.execute("""CREATE TABLE IF NOT EXISTS guides(
+  channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
 db.commit()
 
 
@@ -416,8 +421,14 @@ async def on_ready():
             await bot.sync_commands(guild_ids=[g.id for g in bot.guilds], force=True)
             for g in bot.guilds:
                 cmds = await bot.http.get_guild_commands(bot.application_id, g.id)
+                # On affiche aussi les permissions exigées : une commande restreinte
+                # reste invisible pour les membres sans le droit correspondant.
+                def perms(c):
+                    p = c.get("default_member_permissions")
+                    return "" if p in (None, "0") else f" (réservée: {p})"
                 print(f"Commandes sur « {g.name} » ({len(cmds)}) : "
-                      + ", ".join('/' + c["name"] for c in sorted(cmds, key=lambda c: c["name"])))
+                      + ", ".join('/' + c["name"] + perms(c)
+                                  for c in sorted(cmds, key=lambda c: c["name"])))
             glob = await bot.http.get_global_commands(bot.application_id)
             print(f"Commandes globales restantes : {len(glob)} (0 attendu, sinon doublons)")
         except Exception as exc:
@@ -571,7 +582,33 @@ async def guide(ctx):
         inline=False)
     e.set_footer(text="/board installs the live ranking · /best shows the top on demand "
                       "· /wallet <address> analyses a portfolio")
-    await ctx.respond(embed=e)
+
+    # Réécrire le message existant s'il y en a un : sinon l'ancienne version reste
+    # affichée dans le salon et deux guides cohabitent.
+    row = db.execute("SELECT message_id FROM guides WHERE channel_id=?",
+                     (ctx.channel.id,)).fetchone()
+    if row:
+        try:
+            msg = await ctx.channel.fetch_message(row[0])
+            await msg.edit(embed=e)
+            db.execute("UPDATE guides SET updated=? WHERE channel_id=?",
+                       (int(time.time()), ctx.channel.id))
+            db.commit()
+            return await ctx.respond("📖 Guide updated in place (pinned message).",
+                                     ephemeral=True)
+        except discord.NotFound:
+            pass                                      # message supprimé → on le recrée
+
+    msg = await ctx.channel.send(embed=e)
+    try:
+        await msg.pin()
+    except discord.Forbidden:
+        pass                                          # pas la permission d'épingler
+    db.execute("INSERT OR REPLACE INTO guides VALUES(?,?,?)",
+               (ctx.channel.id, msg.id, int(time.time())))
+    db.commit()
+    await ctx.respond("📖 Guide posted and pinned. Running /guide again will update "
+                      "this same message instead of adding another one.", ephemeral=True)
 
 
 @bot.slash_command(name="unwatch", description="Unsubscribe this channel", guild_ids=GUILDS)
