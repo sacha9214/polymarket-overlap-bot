@@ -76,20 +76,20 @@ def explain_outcome(title: str, outcome: str) -> str:
     m = re.search(r"O/U\s*([\d.]+)", t, re.I) or re.search(r"(?:Over/Under|Total)\s*([\d.]+)", t, re.I)
     line = m.group(1) if m else None
     if re.fullmatch(r"over", o, re.I):
-        return (f"total du match **supérieur à {line}** (soit {math.ceil(float(line))} ou plus, "
-                f"les deux équipes confondues)" if line else "total du match au-dessus de la ligne")
+        return (f"match total **above {line}** ({math.ceil(float(line))} or more, both teams combined)"
+                if line else "match total above the line")
     if re.fullmatch(r"under", o, re.I):
-        return (f"total du match **inférieur à {line}** (soit {math.floor(float(line))} ou moins, "
-                f"les deux équipes confondues)" if line else "total du match en dessous de la ligne")
+        return (f"match total **below {line}** ({math.floor(float(line))} or fewer, both teams combined)"
+                if line else "match total below the line")
     if re.search(r"spread|handicap", t, re.I):
         sp = re.search(r"([+-]?\d+(?:[.,]\d+)?)\s*\)?\s*$", t) or re.search(r"([+-]\d+(?:[.,]\d+)?)", t)
-        return (f"{o} l'emporte avec le handicap {sp.group(1)} appliqué à son score"
-                if sp else f"{o} l'emporte handicap appliqué")
+        return (f"{o} wins with a {sp.group(1)} handicap applied to their score"
+                if sp else f"{o} wins once the handicap is applied")
     if re.fullmatch(r"yes", o, re.I):
-        return "la question du titre se réalise"
+        return "the question in the title comes true"
     if re.fullmatch(r"no", o, re.I):
-        return "la question du titre ne se réalise pas"
-    return f"victoire de {o}"
+        return "the question in the title does not come true"
+    return f"{o} wins"
 
 
 # ---------------------------------------------------------------------------
@@ -271,15 +271,15 @@ class Wallet:
         # Le PnL de la semaine vient du classement (fiable) ; le taux de réussite du
         # sous-ensemble de paris résolus pendant la fenêtre d'historique observable.
         if self.tr and self.tr.trades >= 5:
-            base = f"{round(self.tr.win_rate*100)}% de réussite sur {self.tr.trades} paris résolus"
+            base = f"{round(self.tr.win_rate*100)}% win rate over {self.tr.trades} settled bets"
             if self.lb and self.lb.get("pnl") is not None:
                 pnl = self.lb["pnl"]
-                return f"{'+' if pnl>=0 else '−'}{fmt_usd(abs(pnl))} cette semaine · {base}"
+                return f"{'+' if pnl>=0 else '−'}{fmt_usd(abs(pnl))} this week · {base}"
             return base
         if self.lb:
             pnl = self.lb.get("pnl") or 0
-            return f"{'+' if pnl>=0 else '−'}{fmt_usd(abs(pnl))} (classement)"
-        return "palmarès inconnu"
+            return f"{'+' if pnl>=0 else '−'}{fmt_usd(abs(pnl))} (leaderboard)"
+        return "no track record available"
 
 
 async def load_wallet(c: Client, addr: str, lb: dict | None) -> Wallet:
@@ -418,12 +418,12 @@ def verdict(m: dict) -> tuple[str, str, int]:
     pts = round(m["edge"] * 100)
     price = m.get("price")
     if price is None or price <= 0.01 or price >= 0.99:
-        return "hold", "SUIVRE", pts
+        return "hold", "WATCH", pts
     if pts >= 2:
-        return "buy", f"ACHETER « {outcome_label(m['title'], m['outcome'])} » @ {round(price*100)}¢", pts
+        return "buy", f"BUY \u201c{outcome_label(m['title'], m['outcome'])}\u201d @ {round(price*100)}\u00a2", pts
     if pts <= -2:
-        return "avoid", "ÉVITER", pts
-    return "hold", "SUIVRE", pts
+        return "avoid", "AVOID", pts
+    return "hold", "WATCH", pts
 
 
 def market_url(m: dict) -> str:

@@ -7,10 +7,14 @@ ou en SORT — sans que tu aies à ouvrir quoi que ce soit.
 
 Commandes :
   /best        les meilleures entrées du moment
+  /board       installe le tableau vivant dans le salon
+  /guide       poste le mode d'emploi (à épingler)
   /wallet      les paris et le palmarès d'une adresse
   /watch       abonner ce salon aux alertes
   /unwatch     désabonner ce salon
   /status      état de la surveillance
+
+Textes affichés en anglais (public du serveur) ; commentaires en français.
 
 Jeton : mets-le dans un fichier token.txt à côté de ce script (une ligne),
 ou dans la variable d'environnement DISCORD_BOT_TOKEN. Ne le partage jamais.
@@ -84,7 +88,10 @@ def meta_set(k, v):
     db.commit()
 
 
-bot = discord.Bot(intents=discord.Intents.default())
+# auto_sync_commands=False : sinon py-cord enregistre aussi les commandes en GLOBAL,
+# elles cohabitent avec les copies par serveur et Discord les affiche EN DOUBLE.
+# On synchronise nous-mêmes, uniquement sur les serveurs du bot (effet immédiat).
+bot = discord.Bot(intents=discord.Intents.default(), auto_sync_commands=False)
 
 # Un seul cycle d'analyse à la fois : les commandes réutilisent le cache récent.
 _lock = asyncio.Lock()
@@ -110,23 +117,23 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
     if kind == "new":
         colour = GOLD
 
-    prefix = {"new": "🆕 Le smart money vient d'entrer", "pick": "🎯"}.get(kind, "")
+    prefix = {"new": "🆕 Smart money just entered", "pick": "🎯"}.get(kind, "")
     label_out = ov.outcome_label(m["title"], m["outcome"])
 
     # Même lecture que les cartes du site : le pari et sa traduction, puis le contexte.
     desc = [f"## {m['title']}",
-            f"**Le pari : `{label_out}`** = {ov.explain_outcome(m['title'], m['outcome'])}."]
+            f"**The bet: `{label_out}`** = {ov.explain_outcome(m['title'], m['outcome'])}."]
 
     avg_entry = m.get("avgEntry") or 0
-    line = (f"**{len(m['holders'])} traders** ont posé **{ov.fmt_usd(m['totalValue'])}** dessus "
-            f"(entrée moyenne {round(avg_entry*100)}¢, prix actuel {round((m['price'] or 0)*100)}¢).")
+    line = (f"**{len(m['holders'])} traders** put **{ov.fmt_usd(m['totalValue'])}** on it "
+            f"(avg entry {round(avg_entry*100)}¢, now {round((m['price'] or 0)*100)}¢).")
     good = sum(1 for h in m["holders"] if (h["wallet"].quality or 0) > 0)
     if good == len(m["holders"]):
-        line += " Tous sont gagnants sur leur historique récent."
+        line += " All of them are profitable over their recent history."
     elif good == 0:
-        line += " ⚠️ Aucun n'est gagnant sur son historique récent."
+        line += " ⚠️ None of them is profitable over their recent history."
     else:
-        line += f" {good}/{len(m['holders'])} sont gagnants sur leur historique récent."
+        line += f" {good}/{len(m['holders'])} are profitable over their recent history."
     desc.append(line)
 
     if m.get("contested"):
@@ -134,29 +141,29 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
         opp_val = sum(o["value"] for o in opp)
         share = round(opp_val / max(1e-9, opp_val + m["totalValue"]) * 100)
         detail = ", ".join(
-            f"{o['n']} trader{'s' if o['n'] > 1 else ''} parie{'nt' if o['n'] > 1 else ''} "
-            f"**{ov.fmt_usd(o['value'])}** sur « {ov.outcome_label(m['title'], o['outcome'])} »"
+            f"{o['n']} trader{'s' if o['n'] > 1 else ''} bet{'' if o['n'] > 1 else 's'} "
+            f"**{ov.fmt_usd(o['value'])}** on \u201c{ov.outcome_label(m['title'], o['outcome'])}\u201d"
             for o in opp)
-        desc.append(f"> ⚔️ **Le smart money n'est pas d'accord.** {detail} — contre "
-                    f"**{ov.fmt_usd(m['totalValue'])}** de ce côté, soit **{share}%** de "
-                    f"l'argent suivi à contre-courant.")
+        desc.append(f"> ⚔️ **The smart money disagrees.** {detail} — against "
+                    f"**{ov.fmt_usd(m['totalValue'])}** on this side, i.e. **{share}%** of the "
+                    f"tracked money betting the other way.")
 
     if avg_entry and m.get("price") and (m["price"] - avg_entry) > 0.08:
-        desc.append(f"> ⚠️ **Tu arrives après eux.** Ils sont entrés à {round(avg_entry*100)}¢, "
-                    f"le marché est à {round(m['price']*100)}¢.")
+        desc.append(f"> ⚠️ **You are late.** They entered at {round(avg_entry*100)}¢, "
+                    f"the market is now at {round(m['price']*100)}¢.")
 
     e = discord.Embed(title=f"{prefix} · {label}"[:250],
                       description="\n\n".join(desc)[:4000],
                       url=ov.market_url(m), colour=colour)
 
-    e.add_field(name="Proba estimée",
-                value=f"**{round(m['myProba']*100)}%**\nmarché : {round(m['price']*100)}% ({pts:+d})",
+    e.add_field(name="Estimated probability",
+                value=f"**{round(m['myProba']*100)}%**\nmarket: {round(m['price']*100)}% ({pts:+d})",
                 inline=True)
     stake = 100
     gain = stake * (1 - m["price"]) / m["price"] if 0 < (m["price"] or 0) < 1 else 0
-    e.add_field(name="Ta mise de $100 → si gagné",
+    e.add_field(name="Your $100 → if it wins",
                 value=f"**+{ov.fmt_usd(gain)}**", inline=True)
-    e.add_field(name="Les wallets visent",
+    e.add_field(name="They are aiming for",
                 value=f"**+{ov.fmt_usd(m.get('potentialGain') or 0)}**", inline=True)
 
     # Le détail wallet par wallet, comme le panneau dépliable du site.
@@ -170,28 +177,28 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
             pct_txt = f"{pct:.0f}%" if pct >= 1 else (f"{pct:.1f}%" if pct >= 0.1 else "<0.1%")
             rows.append(
                 f"**{w.name}**\n"
-                f"💵 {ov.fmt_usd(invested)} à {round((h['avg'] or 0)*100)}¢ → "
+                f"💵 {ov.fmt_usd(invested)} at {round((h['avg'] or 0)*100)}¢ → "
                 f"{ov.fmt_usd(h['value'])} ({'+' if perf >= 0 else '−'}{abs(round(perf*100))}%) "
-                f"· {pct_txt} de son portefeuille\n"
+                f"· {pct_txt} of their portfolio\n"
                 f"📊 {w.record_str()}")
         return "\n".join(rows)[:1000] or "—"
 
-    e.add_field(name=f"✅ Pour « {label_out} » — {ov.fmt_usd(m['totalValue'])}",
+    e.add_field(name=f"✅ For \u201c{label_out}\u201d — {ov.fmt_usd(m['totalValue'])}",
                 value=who(m["holders"]), inline=False)
     if m.get("contested"):
         for o in sorted((o for o in m["others"] if o["n"] > 0), key=lambda o: -o["value"])[:1]:
             e.add_field(
-                name=f"⚔️ Contre — « {ov.outcome_label(m['title'], o['outcome'])} » — {ov.fmt_usd(o['value'])}",
+                name=f"⚔️ Against — \u201c{ov.outcome_label(m['title'], o['outcome'])}\u201d — {ov.fmt_usd(o['value'])}",
                 value=who(o["holders"]), inline=False)
 
     if m.get("daysLeft") is not None:
         d = m["daysLeft"]
-        when = "résout aujourd'hui" if d <= 0 else ("résout demain" if d == 1 else f"résout dans {d} j")
+        when = "resolves today" if d <= 0 else ("resolves tomorrow" if d == 1 else f"resolves in {d}d")
     else:
-        when = "échéance inconnue"
-    foot = [when, f"top {PRESET_SIZE} traders de la semaine"]
+        when = "no resolution date"
+    foot = [when, f"top {PRESET_SIZE} traders of the week"]
     if m.get("hasTwins"):
-        foot.append("⚠️ wallets très similaires — probablement la même personne")
+        foot.append("⚠️ near-identical wallets — probably the same person")
     e.set_footer(text=" · ".join(foot))
     return e
 
@@ -204,35 +211,35 @@ def board_embed(markets: list) -> discord.Embed:
     picks = [m for m in markets if ov.verdict(m)[0] == "buy"]
     picks.sort(key=lambda m: -m["evTime"])
     e = discord.Embed(
-        title="🏆 Meilleurs overlaps du moment",
+        title="🏆 Best overlaps right now",
         description=(
-            "Les marchés où **plusieurs des 50 meilleurs traders de la semaine** ont "
-            "misé du même côté, classés par intérêt. Mis à jour automatiquement.\n"
-            "*Un « overlap » = un pari sur lequel plusieurs bons traders se retrouvent.*"),
+            "Markets where **several of the week's 50 best traders** have bet on the "
+            "same side, ranked by how interesting they look. Updated automatically.\n"
+            "*An \u201coverlap\u201d = a bet that several good traders landed on together.*"),
         colour=GOLD)
     if not picks:
-        e.add_field(name="Rien de convaincant pour l'instant",
-                    value="Aucun marché ne dépasse le seuil. Le tableau se remplira "
-                          "au prochain mouvement — c'est normal et voulu : pas de bruit.",
+        e.add_field(name="Nothing convincing right now",
+                    value="No market clears the bar. The board will fill up on the next "
+                          "move — this is by design: no noise for the sake of noise.",
                     inline=False)
     for i, m in enumerate(picks[:5], 1):
         d = m.get("daysLeft")
-        when = "aujourd'hui" if (d is not None and d <= 0) else (
-               "demain" if d == 1 else (f"dans {d} j" if d is not None else "—"))
+        when = "today" if (d is not None and d <= 0) else (
+               "tomorrow" if d == 1 else (f"in {d}d" if d is not None else "—"))
         label = ov.outcome_label(m["title"], m["outcome"])
         gain = 100 * (1 - m["price"]) / m["price"] if 0 < (m["price"] or 0) < 1 else 0
-        warn = " ⚔️ *avis partagés*" if m.get("contested") else ""
+        warn = " ⚔️ *they disagree*" if m.get("contested") else ""
         e.add_field(
             name=f"{i}. {m['title'][:80]}",
-            value=(f"**Parier `{label}` à {round(m['price']*100)}¢** — "
+            value=(f"**Bet `{label}` at {round(m['price']*100)}¢** — "
                    f"{ov.explain_outcome(m['title'], m['outcome'])}\n"
-                   f"👥 {len(m['holders'])} traders · 💰 {ov.fmt_usd(m['totalValue'])} engagés · "
-                   f"🎯 proba estimée {round(m['myProba']*100)}% (marché {round(m['price']*100)}%)\n"
-                   f"💵 100 $ misés → **+{ov.fmt_usd(gain)}** si ça passe · ⏳ {when}{warn}\n"
-                   f"[Voir sur Polymarket]({ov.market_url(m)})")[:1020],
+                   f"👥 {len(m['holders'])} traders · 💰 {ov.fmt_usd(m['totalValue'])} at stake · "
+                   f"🎯 estimated {round(m['myProba']*100)}% (market {round(m['price']*100)}%)\n"
+                   f"💵 $100 → **+{ov.fmt_usd(gain)}** if it lands · ⏳ {when}{warn}\n"
+                   f"[View on Polymarket]({ov.market_url(m)})")[:1020],
             inline=False)
-    e.set_footer(text=f"Mis à jour toutes les {POLL_MINUTES} min · "
-                      "informatif, pas un conseil financier · /guide pour tout comprendre")
+    e.set_footer(text=f"Updated every {POLL_MINUTES} min · "
+                      "information only, not financial advice · /guide explains everything")
     e.timestamp = discord.utils.utcnow()
     return e
 
@@ -368,13 +375,13 @@ async def watcher():
         big_exits = sorted((x for x in exits if (x[3] or 0) >= (min_value or 0)),
                            key=lambda x: -(x[3] or 0))
         if big_exits:
-            txt = "\n".join(f"• **{x[1]}** — « {ov.outcome_label(x[1], x[2])} » "
-                            f"(valait {ov.fmt_usd(x[3] or 0)})" for x in big_exits[:5])
+            txt = "\n".join(f"• **{x[1]}** — \u201c{ov.outcome_label(x[1], x[2])}\u201d "
+                            f"(was worth {ov.fmt_usd(x[3] or 0)})" for x in big_exits[:5])
             e = discord.Embed(
-                title="🚪 Sorties — ils ont liquidé ces positions",
+                title="🚪 Exits — they closed these positions",
                 description=txt[:3800], colour=RED)
-            e.set_footer(text="Sorties de traders encore suivis — pas un simple "
-                              "changement de classement. Un abandon vaut un achat.")
+            e.set_footer(text="Exits by traders still tracked — not a leaderboard reshuffle. "
+                              "Walking away is as telling as buying in.")
             try:
                 await ch.send(embed=e)
             except Exception as exc:
@@ -396,6 +403,26 @@ async def on_ready():
           f"https://discord.com/oauth2/authorize?client_id={bot.user.id}"
           "&permissions=18432&scope=bot%20applications.commands")
     print(f"Serveurs : {[g.name for g in bot.guilds] or 'aucun — utilise le lien ci-dessus'}")
+
+    # Sans DISCORD_GUILD_ID, les commandes sont enregistrées globalement et Discord met
+    # jusqu'à UNE HEURE à les propager : une nouvelle commande semble alors « ne pas
+    # exister ». On les resynchronise sur chaque serveur où le bot se trouve, où la
+    # prise en compte est immédiate — aucune configuration à faire.
+    if bot.guilds:
+        try:
+            # On efface les globales AVANT de resynchroniser, sinon les copies déjà
+            # publiées continuent d'apparaître en double dans le menu.
+            await bot.http.bulk_upsert_global_commands(bot.application_id, [])
+            await bot.sync_commands(guild_ids=[g.id for g in bot.guilds], force=True)
+            for g in bot.guilds:
+                cmds = await bot.http.get_guild_commands(bot.application_id, g.id)
+                print(f"Commandes sur « {g.name} » ({len(cmds)}) : "
+                      + ", ".join('/' + c["name"] for c in sorted(cmds, key=lambda c: c["name"])))
+            glob = await bot.http.get_global_commands(bot.application_id)
+            print(f"Commandes globales restantes : {len(glob)} (0 attendu, sinon doublons)")
+        except Exception as exc:
+            print("Synchronisation des commandes impossible —", exc)
+
     if not watcher.is_running():
         watcher.start()
 
@@ -407,36 +434,36 @@ async def on_ready():
 # Sous Python 3.14 les annotations sont évaluées paresseusement (PEP 649) et
 # py-cord les lisait comme du texte : toutes les options devenaient des chaînes
 # obligatoires. Le décorateur ne dépend pas des annotations.
-@bot.slash_command(name="best", description="Les meilleures entrées du moment", guild_ids=GUILDS)
-@discord.option("nombre", int, description="Combien en afficher (1-5)",
+@bot.slash_command(name="best", description="The best entries right now", guild_ids=GUILDS)
+@discord.option("count", int, description="How many to show (1-5)",
                 min_value=1, max_value=5, default=3, required=False)
-async def best(ctx, nombre: int):
+async def best(ctx, count: int):
     await ctx.defer()
     try:
         _, markets = await get_analysis()
     except Exception as exc:
-        return await ctx.respond(f"Impossible de joindre l'API Polymarket : {exc}")
-    picks = [m for m in markets if ov.verdict(m)[0] == "buy"][:nombre]
+        return await ctx.respond(f"Could not reach the Polymarket API: {exc}")
+    picks = [m for m in markets if ov.verdict(m)[0] == "buy"][:count]
     if not picks:
-        return await ctx.respond("Aucune entrée convaincante en ce moment — le smart money "
-                                 "est aligné avec le marché partout. C'est une info aussi.")
+        return await ctx.respond("Nothing convincing right now — the smart money agrees with the market "
+                                 "everywhere. That is information too.")
     await ctx.respond(embeds=[market_embed(m) for m in picks])
 
 
-@bot.slash_command(name="wallet", description="Les paris et le palmarès d'une adresse", guild_ids=GUILDS)
-@discord.option("adresse", str, description="Adresse Polymarket (0x…)")
-async def wallet(ctx, adresse: str):
-    a = adresse.strip()
+@bot.slash_command(name="wallet", description="Bets and track record of an address", guild_ids=GUILDS)
+@discord.option("address", str, description="Polymarket address (0x…)")
+async def wallet(ctx, address: str):
+    a = address.strip()
     if not (a.startswith("0x") and len(a) == 42):
-        return await ctx.respond("Adresse invalide : il faut le 0x… de 42 caractères "
-                                 "(celui de l'URL du profil Polymarket).", ephemeral=True)
+        return await ctx.respond("Invalid address: it must be the 42-character 0x… "
+                                 "(the one in your Polymarket profile URL).", ephemeral=True)
     await ctx.defer()
     try:
         ws, _ = await ov.analyze([a])
     except Exception as exc:
-        return await ctx.respond(f"Impossible de joindre l'API Polymarket : {exc}")
+        return await ctx.respond(f"Could not reach the Polymarket API: {exc}")
     if not ws:
-        return await ctx.respond("Adresse introuvable ou sans position.")
+        return await ctx.respond("Address not found, or it holds no position.")
     w = ws[0]
     openp = [p for p in w.positions if p.get("redeemable") is not True
              and (p.get("currentValue") or 0) >= 0.01]
@@ -446,123 +473,127 @@ async def wallet(ctx, adresse: str):
     e = discord.Embed(title=f"👤 {w.name}",
                       url=f"https://polymarket.com/profile/{w.addr}",
                       colour=GREEN if w.open_pnl >= 0 else RED)
-    e.add_field(name="Positions ouvertes",
-                value=f"{ov.fmt_usd(w.portfolio)} · {len(openp)} paris", inline=True)
-    e.add_field(name="Plus/moins-value",
+    e.add_field(name="Open positions",
+                value=f"{ov.fmt_usd(w.portfolio)} · {len(openp)} bets", inline=True)
+    e.add_field(name="Unrealised P&L",
                 value=f"{'+' if w.open_pnl>=0 else '−'}{ov.fmt_usd(abs(w.open_pnl))}", inline=True)
-    e.add_field(name="Palmarès réel", value=w.record_str(), inline=False)
+    e.add_field(name="Real track record", value=w.record_str(), inline=False)
     if unclaimed:
-        e.add_field(name="💰 Gains non réclamés",
-                    value=f"**{ov.fmt_usd(sum(p['currentValue'] for p in unclaimed))}** sur "
-                          f"{len(unclaimed)} paris gagnés — l'argent n'arrive qu'après réclamation.",
+        e.add_field(name="💰 Unclaimed winnings",
+                    value=f"**{ov.fmt_usd(sum(p['currentValue'] for p in unclaimed))}** across "
+                          f"{len(unclaimed)} winning bets — the money only lands once claimed.",
                     inline=False)
     top = sorted(openp, key=lambda p: -(p.get("currentValue") or 0))[:5]
     if top:
-        e.add_field(name="Ses plus grosses positions", value="\n".join(
+        e.add_field(name="Biggest open positions", value="\n".join(
             f"• **{(p.get('title') or '')[:60]}** — "
             f"{ov.outcome_label(p.get('title'), p.get('outcome'))} · "
-            f"{ov.fmt_usd(p.get('currentValue') or 0)} (entré à {round((p.get('avgPrice') or 0)*100)}¢)"
+            f"{ov.fmt_usd(p.get('currentValue') or 0)} (entered at {round((p.get('avgPrice') or 0)*100)}¢)"
             for p in top)[:1000], inline=False)
     if w.tr and w.tr.days:
-        e.set_footer(text=f"Palmarès calculé sur les {ov.ACTIVITY_LIMIT} derniers événements "
-                          f"(~{w.tr.days} j) — l'API ne remonte pas plus loin.")
+        e.set_footer(text=f"Track record over the last {ov.ACTIVITY_LIMIT} events "
+                          f"(~{w.tr.days}d) — the API does not go back further.")
     await ctx.respond(embed=e)
 
 
-@bot.slash_command(name="watch", description="Abonner ce salon aux alertes", guild_ids=GUILDS)
+@bot.slash_command(name="watch", description="Subscribe this channel to alerts", guild_ids=GUILDS)
 @discord.default_permissions(manage_guild=True)
-@discord.option("seuil", int, description="Ne prévenir qu'au-dessus de ce montant ($)",
+@discord.option("threshold", int, description="Only alert above this amount ($)",
                 min_value=0, default=DEFAULT_MIN_VALUE, required=False)
-async def watch(ctx, seuil: int):
+async def watch(ctx, threshold: int):
+    await ctx.defer()
     db.execute("INSERT OR REPLACE INTO subs VALUES(?,?,?,?)",
-               (ctx.channel.id, ctx.guild.id if ctx.guild else 0, seuil, int(time.time())))
+               (ctx.channel.id, ctx.guild.id if ctx.guild else 0, threshold, int(time.time())))
     db.commit()
     await ctx.respond(
-        f"✅ Ce salon recevra les alertes : entrées du smart money au-dessus de "
-        f"**{ov.fmt_usd(seuil)}**, et leurs sorties. Vérification toutes les {POLL_MINUTES} min.\n"
-        f"_Le premier cycle sert de référence : les alertes commencent au suivant._")
+        f"✅ This channel will get alerts: smart-money entries above "
+        f"**{ov.fmt_usd(threshold)}**, and their exits. Checked every {POLL_MINUTES} min.\n"
+        f"_The first cycle is the baseline — alerts start from the next one._")
 
 
-@bot.slash_command(name="tableau",
-                   description="Installer ici le tableau des meilleurs overlaps, tenu à jour",
+@bot.slash_command(name="board",
+                   description="Install the live board of best overlaps in this channel",
                    guild_ids=GUILDS)
-async def tableau(ctx):
+async def board(ctx):
     await ctx.defer()
     _, markets = await get_analysis()
     msg = await ctx.channel.send(embed=board_embed(markets))
     try:
         await msg.pin()
     except discord.Forbidden:
-        pass                                          # pas la permission d'épingler
+        pass                                          # pas la permission d'épingler (silencieux)
     db.execute("INSERT OR REPLACE INTO board VALUES(?,?,?)",
                (ctx.channel.id, msg.id, int(time.time())))
     db.commit()
     await ctx.respond(
-        f"Tableau installé et épinglé. Il est **réécrit toutes les {POLL_MINUTES} min** "
-        "au même endroit : ce salon montrera toujours l'état actuel, sans fil qui défile.\n"
-        "Pense à `/guide` pour poster le mode d'emploi à épingler aussi.", ephemeral=True)
+        f"Board installed and pinned. It is **rewritten every {POLL_MINUTES} min** in place, "
+        "so this channel always shows the current state — no feed to scroll through.\n"
+        "Run `/guide` to post the how-to-read message and pin it too.", ephemeral=True)
 
 
-@bot.slash_command(name="guide", description="Poster le mode d'emploi du salon (à épingler)",
+@bot.slash_command(name="guide", description="Post the how-to-read guide for this channel (pin it)",
                    guild_ids=GUILDS)
 async def guide(ctx):
+    await ctx.defer()
     e = discord.Embed(
-        title="📖 Comment lire ce salon",
-        description="Ce salon suit les **50 meilleurs traders de la semaine** sur Polymarket "
-                    "et repère les paris sur lesquels **plusieurs d'entre eux se retrouvent**.",
+        title="📖 How to read this channel",
+        description="This channel tracks the **50 best Polymarket traders of the week** and "
+                    "flags the bets that **several of them land on together**.",
         colour=GOLD)
     e.add_field(
-        name="1️⃣ C'est quoi un « overlap » ?",
-        value="Un marché où **au moins 2 bons traders ont misé du même côté**. "
-              "Seul, un trader peut se tromper ; quand plusieurs bons convergent, "
-              "ça vaut le coup d'aller regarder.", inline=False)
+        name="1️⃣ What is an \u201coverlap\u201d?",
+        value="A market where **at least 2 good traders bet on the same side**. "
+              "One trader alone can be wrong; when several good ones converge, "
+              "it is worth a look.", inline=False)
     e.add_field(
-        name="2️⃣ Les verdicts",
-        value="🟢 **ACHETER** — les traders suivis voient l'issue plus probable que le marché\n"
-              "⚪ **SUIVRE** — leur avis colle au prix, rien à gagner de spécial\n"
-              "🔴 **ÉVITER** — ceux qui sont dessus perdent d'habitude, ou sont mal entrés\n"
-              "⚔️ **avis partagés** — ils se contredisent entre eux : signal faible", inline=False)
+        name="2️⃣ The verdicts",
+        value="🟢 **BUY** — the tracked traders see this outcome as likelier than the market does\n"
+              "⚪ **WATCH** — their view matches the price, nothing special to gain\n"
+              "🔴 **AVOID** — those holding it usually lose, or entered badly\n"
+              "⚔️ **they disagree** — tracked traders contradict each other: weak signal", inline=False)
     e.add_field(
-        name="3️⃣ Les chiffres",
-        value="**Prix en ¢** = la probabilité selon le marché (58¢ ≈ 58 % de chances). "
-              "C'est aussi ton coût : 58¢ misés rapportent 1 $ si tu gagnes.\n"
-              "**Proba estimée** = la même chose corrigée selon *qui* est positionné "
-              "(leur palmarès, la part de portefeuille engagée, leur prix d'entrée).\n"
-              "**100 $ → +X** = ce que rapporteraient 100 $ si le pari passe.", inline=False)
+        name="3️⃣ The numbers",
+        value="**Price in ¢** = the market's probability (58¢ ≈ 58% chance). "
+              "It is also your cost: 58¢ staked pays $1 if you win.\n"
+              "**Estimated probability** = the same thing adjusted for *who* is positioned "
+              "(their track record, how much of their portfolio they put in, their entry price).\n"
+              "**$100 → +X** = what $100 would return if the bet lands.", inline=False)
     e.add_field(
         name="4️⃣ Over / Under",
-        value="Ce ne sont pas des équipes : c'est le **total de points du match**. "
-              "« Over 8.5 » = 9 points ou plus, les deux équipes confondues. "
-              "Un même match a plusieurs lignes (7.5, 8.5, 9.5…).", inline=False)
+        value="These are not teams: it is the **match point total**. "
+              "\u201cOver 8.5\u201d = 9 points or more, both teams combined. "
+              "A single match has several lines (7.5, 8.5, 9.5…).", inline=False)
     e.add_field(
-        name="5️⃣ À garder en tête",
-        value="Ces traders **perdent aussi** des paris. Copier n'est pas gagner : ils entrent "
-              "à un prix que tu n'auras plus, et peuvent sortir sans prévenir. "
-              "**Rien ici n'est un conseil financier** — ne mise que ce que tu peux perdre.",
+        name="5️⃣ Keep in mind",
+        value="These traders **lose bets too**. Copying is not winning: they enter at a price "
+              "you will not get, and they can exit without warning. "
+              "**Nothing here is financial advice** — only stake what you can afford to lose.",
         inline=False)
-    e.set_footer(text="/tableau installe le classement · /best affiche le top à la demande "
-                      "· /wallet <adresse> analyse un portefeuille")
+    e.set_footer(text="/board installs the live ranking · /best shows the top on demand "
+                      "· /wallet <address> analyses a portfolio")
     await ctx.respond(embed=e)
 
 
-@bot.slash_command(name="unwatch", description="Désabonner ce salon", guild_ids=GUILDS)
+@bot.slash_command(name="unwatch", description="Unsubscribe this channel", guild_ids=GUILDS)
 @discord.default_permissions(manage_guild=True)
 async def unwatch(ctx):
+    await ctx.defer()
     db.execute("DELETE FROM subs WHERE channel_id=?", (ctx.channel.id,))
     db.commit()
-    await ctx.respond("🔕 Alertes coupées pour ce salon.")
+    await ctx.respond("🔕 Alerts switched off for this channel.")
 
 
-@bot.slash_command(name="status", description="État de la surveillance", guild_ids=GUILDS)
+@bot.slash_command(name="status", description="Monitoring status", guild_ids=GUILDS)
 async def status(ctx):
+    await ctx.defer()
     n = db.execute("SELECT COUNT(*) FROM subs").fetchone()[0]
     tracked = db.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
     last = meta_get("last_run")
-    ago = f"il y a {int((time.time()-int(last))//60)} min" if last else "jamais"
+    ago = f"{int((time.time()-int(last))//60)} min ago" if last else "never"
     await ctx.respond(
-        f"**Surveillance** : {n} salon(s) abonné(s) · {tracked} marchés suivis\n"
-        f"**Dernier passage** : {ago} · fréquence {POLL_MINUTES} min · "
-        f"top {PRESET_SIZE} traders de la semaine")
+        f"**Monitoring**: {n} subscribed channel(s) · {tracked} markets tracked\n"
+        f"**Last check**: {ago} · every {POLL_MINUTES} min · "
+        f"top {PRESET_SIZE} traders of the week")
 
 
 if __name__ == "__main__":

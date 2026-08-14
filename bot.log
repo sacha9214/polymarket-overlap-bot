@@ -29,3 +29,64 @@ Connecté : Polymaket#6552 · surveillance toutes les 20 min
 Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
 Serveurs : ['Polymarket Overlap']
 watcher 20:29:40: 344 marchés · 50 wallets (0 changements de classement ignorés) → 3 entrée(s) ACHETER, 0 sortie(s)
+watcher 20:33:15: 337 marchés · 40 wallets (10 changements de classement ignorés) → 0 entrée(s) ACHETER, 7 sortie(s)
+
+===== v5 (sync commandes) 20:34:13 =====
+Connecté : Polymaket#6552 · surveillance toutes les 20 min
+Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
+Serveurs : ['Polymarket Overlap']
+Commandes synchronisées sur 1 serveur(s) : /best, /best, /guide, /guide, /status, /status, /tableau, /tableau, /unwatch, /unwatch, /wallet, /wallet, /watch, /watch
+watcher 20:34:31: 344 marchés · 50 wallets (10 changements de classement ignorés) → 1 entrée(s) ACHETER, 0 sortie(s)
+
+===== v6 (dedup commandes) 20:34:52 =====
+Connecté : Polymaket#6552 · surveillance toutes les 20 min
+Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
+Serveurs : ['Polymarket Overlap']
+Commandes sur « Polymarket Overlap » (7) : /best, /guide, /status, /tableau, /unwatch, /wallet, /watch
+Ignoring exception in command guide:
+Traceback (most recent call last):
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/commands/core.py", line 132, in wrapped
+    ret = await coro(arg)
+          ^^^^^^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/commands/core.py", line 1105, in _invoke
+    await self.callback(ctx, **kwargs)
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 559, in guide
+    name="5️⃣ À garder en tête",
+    ^^^^^^^^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/commands/context.py", line 320, in respond
+    return await self.interaction.respond(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/interactions.py", line 819, in respond
+    return await self.response.send_message(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/interactions.py", line 1211, in send_message
+    await self._locked_response(
+    ...<10 lines>...
+    )
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/interactions.py", line 1572, in _locked_response
+    return await coro
+           ^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/webhook/async_.py", line 226, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10062): Unknown interaction
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/bot.py", line 1306, in invoke_application_command
+    await ctx.command.invoke(ctx)
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/commands/core.py", line 427, in invoke
+    await injected(ctx)
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/commands/core.py", line 140, in wrapped
+    raise ApplicationCommandInvokeError(exc) from exc
+discord.errors.ApplicationCommandInvokeError: Application Command raised an exception: NotFound: 404 Not Found (error code: 10062): Unknown interaction
+Commandes globales restantes : 7 (0 attendu, sinon doublons)
+watcher 20:37:00: 345 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+
+===== v7 (EN + fix doublons/defer) 20:41:33 =====
+Connecté : Polymaket#6552 · surveillance toutes les 20 min
+Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
+Serveurs : ['Polymarket Overlap']
+Commandes sur « Polymarket Overlap » (7) : /best, /board, /guide, /status, /unwatch, /wallet, /watch
+Commandes globales restantes : 0 (0 attendu, sinon doublons)
+watcher 20:42:50: 344 marchés · 50 wallets (0 changements de classement ignorés) → 1 entrée(s) ACHETER, 2 sortie(s)
