@@ -355,3 +355,87 @@ Connecté : Polymaket#6552 · surveillance toutes les 2 min
 Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
 Serveurs : ['Polymarket Overlap']
 Commandes sur « Polymarket Overlap » (8) : /best, /board, /guide, /status, /unwatch (réservée: 32), /wallet, /watch-buys (réservée: 32), /watch-exits (réservée: 32)
+Unhandled exception in internal background task 'watcher'.
+Traceback (most recent call last):
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 261, in refresh_boards
+    return e
+    
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/message.py", line 1914, in edit
+    data = await self._state.http.edit_message(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.channel.id, self.id, **payload
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/http.py", line 389, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10003): Unknown Channel
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/ext/tasks/__init__.py", line 205, in _loop
+    await self.coro(*args, **kwargs)
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 355, in watcher
+    for m in markets])
+    ^^^^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 263, in refresh_boards
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/abc.py", line 1714, in send
+    data = await state.http.send_message(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<13 lines>...
+    )
+    ^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/http.py", line 389, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10003): Unknown Channel
+Commandes globales restantes : 0 (0 attendu, sinon doublons)
+watcher 21:01:17: 346 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+watcher 21:02:50: 345 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 1 sortie(s)
+watcher 21:02:53: 345 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+watcher 21:03:07: 345 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+Task exception was never retrieved
+future: <Task finished name='Task-13' coro=<Loop._loop() done, defined at /Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/ext/tasks/__init__.py:186> exception=NotFound('404 Not Found (error code: 10003): Unknown Channel')>
+Traceback (most recent call last):
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 261, in refresh_boards
+    return e
+    
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/message.py", line 1914, in edit
+    data = await self._state.http.edit_message(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.channel.id, self.id, **payload
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/http.py", line 389, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10003): Unknown Channel
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/ext/tasks/__init__.py", line 247, in _loop
+    raise exc
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/ext/tasks/__init__.py", line 205, in _loop
+    await self.coro(*args, **kwargs)
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 355, in watcher
+    for m in markets])
+    ^^^^^^^^^^^^^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/bot.py", line 263, in refresh_boards
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/abc.py", line 1714, in send
+    data = await state.http.send_message(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<13 lines>...
+    )
+    ^
+  File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/http.py", line 389, in request
+    raise NotFound(response, data)
+discord.errors.NotFound: 404 Not Found (error code: 10003): Unknown Channel
+
+===== v12 (verrou instance unique + tout en EN) 21:04:34 =====
+Connected: Polymaket#6552 · watching every 2 min
+Invite link: https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
+Servers: ['Polymarket Overlap']
+Commands on “Polymarket Overlap” (8): /best, /board, /guide, /status, /unwatch (restricted: 32), /wallet, /watch-buys (restricted: 32), /watch-exits (restricted: 32)
+Global commands left: 0 (expect 0, otherwise duplicates)
+watcher 21:05:50: 345 markets · 50 wallets (0 leaderboard changes ignored) → 0 BUY entries, 0 exit(s)

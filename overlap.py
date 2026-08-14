@@ -492,17 +492,17 @@ async def _demo():
     t0 = time.time()
     ws, markets = await analyze_preset("week", 25)
     buys = [m for m in markets if verdict(m)[0] == "buy"]
-    print(f"{len(ws)} wallets · {len(markets)} marchés en overlap · "
-          f"{len(buys)} ACHETER · {time.time()-t0:.1f}s\n")
+    print(f"{len(ws)} wallets · {len(markets)} overlap markets · "
+          f"{len(buys)} BUY · {time.time()-t0:.1f}s\n")
     for m in buys[:5]:
         cls, label, pts = verdict(m)
         opp = sum(o["n"] for o in m["others"])
         print(f"  {label}")
         print(f"    {m['title'][:66]}")
-        print(f"    proba {round(m['myProba']*100)}% vs marché {round(m['price']*100)}% "
+        print(f"    est. {round(m['myProba']*100)}% vs market {round(m['price']*100)}% "
               f"({pts:+d}) · {len(m['holders'])} traders · {fmt_usd(m['totalValue'])}"
-              + (f" · ⚔️ {opp} en face" if opp else "")
-              + (f" · résout dans {m['daysLeft']}j" if m['daysLeft'] is not None else ""))
+              + (f" · ⚔️ {opp} against" if opp else "")
+              + (f" · resolves in {m['daysLeft']}d" if m['daysLeft'] is not None else ""))
         print(f"    {market_url(m)}\n")
 
 

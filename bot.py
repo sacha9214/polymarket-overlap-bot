@@ -24,9 +24,11 @@ ou dans la variable d'environnement DISCORD_BOT_TOKEN. Ne le partage jamais.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -47,6 +49,19 @@ if not TOKEN:
 # Sync instantané des commandes si tu renseignes ton serveur, sinon global (~1 h).
 GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "0") or 0)
 GUILDS = [GUILD_ID] if GUILD_ID else None
+
+# Un seul bot à la fois. Deux instances simultanées se battent pour enregistrer les
+# commandes (chacune efface celles de l'autre au démarrage) : elles disparaissent alors
+# du menu Discord. Elles doublent aussi les alertes et la charge sur l'API.
+_LOCK_PATH = Path(__file__).with_name("bot.lock")
+_lock_file = open(_LOCK_PATH, "w")
+try:
+    fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit("Another instance is already running (bot.lock held). "
+             "Stop it first:  pkill -f bot.py")
+_lock_file.write(str(os.getpid()))
+_lock_file.flush()
 
 DB_PATH = Path(__file__).with_name("overlap.db")
 POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "2"))    # cycle court : cache l'historique
@@ -275,7 +290,7 @@ async def refresh_boards(markets: list):
             msg = await ch.send(embed=embed)
             db.execute("UPDATE board SET message_id=? WHERE channel_id=?", (msg.id, channel_id))
         except Exception as exc:
-            print("board: mise à jour impossible —", exc)
+            print("board: update failed —", exc)
             continue
         db.execute("UPDATE board SET updated=? WHERE channel_id=?", (int(time.time()), channel_id))
         db.commit()
@@ -320,7 +335,7 @@ async def watcher():
     try:
         wallets, markets = await get_analysis(force=True)
     except Exception as exc:
-        print("watcher: analyse impossible —", exc)
+        print("watcher: analysis failed —", exc)
         return
 
     now = int(time.time())
@@ -367,15 +382,15 @@ async def watcher():
     await refresh_boards(markets)
 
     if first_run:
-        print(f"watcher: état initial enregistré ({len(markets)} marchés, "
-              f"{len(cur_addrs)} wallets), aucune alerte envoyée.")
+        print(f"watcher: baseline saved ({len(markets)} markets, "
+              f"{len(cur_addrs)} wallets), no alert sent.")
         return
 
     stamp = time.strftime("%H:%M:%S")
     churn = len(cur_addrs - prev_addrs) + len(prev_addrs - cur_addrs)
-    print(f"watcher {stamp}: {len(markets)} marchés · {len(cur_addrs)} wallets "
-          f"({churn} changements de classement ignorés) → "
-          f"{len(entries)} entrée(s) ACHETER, {len(exits)} sortie(s)")
+    print(f"watcher {stamp}: {len(markets)} markets · {len(cur_addrs)} wallets "
+          f"({churn} leaderboard changes ignored) → "
+          f"{len(entries)} BUY entr{'y' if len(entries)==1 else 'ies'}, {len(exits)} exit(s)")
 
     # Flux « buys » : uniquement les nouvelles entrées.
     for channel_id, min_value in db.execute(
@@ -389,7 +404,7 @@ async def watcher():
             try:
                 await ch.send(embed=market_embed(m, kind="new"))
             except Exception as exc:
-                print("watcher: envoi impossible —", exc)
+                print("watcher: send failed —", exc)
 
     # Flux « exits » : uniquement les liquidations.
     for channel_id, min_value in db.execute(
@@ -410,7 +425,7 @@ async def watcher():
             try:
                 await ch.send(embed=e)
             except Exception as exc:
-                print("watcher: envoi impossible —", exc)
+                print("watcher: send failed —", exc)
 
 
 @watcher.before_loop
@@ -420,14 +435,14 @@ async def _before():
 
 @bot.event
 async def on_ready():
-    print(f"Connecté : {bot.user} · surveillance toutes les {POLL_MINUTES} min")
+    print(f"Connected: {bot.user} · watching every {POLL_MINUTES} min")
     # L'identifiant d'un bot EST l'Application ID : il peut donc afficher son propre
     # lien d'invitation, sans qu'on ait à retourner chercher quoi que ce soit.
     # Permissions 18432 = Send Messages (2048) + Embed Links (16384).
-    print("Lien d'invitation : "
+    print("Invite link: "
           f"https://discord.com/oauth2/authorize?client_id={bot.user.id}"
           "&permissions=18432&scope=bot%20applications.commands")
-    print(f"Serveurs : {[g.name for g in bot.guilds] or 'aucun — utilise le lien ci-dessus'}")
+    print(f"Servers: {[g.name for g in bot.guilds] or 'none — use the invite link above'}")
 
     # Sans DISCORD_GUILD_ID, les commandes sont enregistrées globalement et Discord met
     # jusqu'à UNE HEURE à les propager : une nouvelle commande semble alors « ne pas
@@ -445,14 +460,14 @@ async def on_ready():
                 # reste invisible pour les membres sans le droit correspondant.
                 def perms(c):
                     p = c.get("default_member_permissions")
-                    return "" if p in (None, "0") else f" (réservée: {p})"
-                print(f"Commandes sur « {g.name} » ({len(cmds)}) : "
+                    return "" if p in (None, "0") else f" (restricted: {p})"
+                print(f"Commands on \u201c{g.name}\u201d ({len(cmds)}): "
                       + ", ".join('/' + c["name"] + perms(c)
                                   for c in sorted(cmds, key=lambda c: c["name"])))
             glob = await bot.http.get_global_commands(bot.application_id)
-            print(f"Commandes globales restantes : {len(glob)} (0 attendu, sinon doublons)")
+            print(f"Global commands left: {len(glob)} (expect 0, otherwise duplicates)")
         except Exception as exc:
-            print("Synchronisation des commandes impossible —", exc)
+            print("Command sync failed —", exc)
 
     if not watcher.is_running():
         watcher.start()
@@ -689,7 +704,7 @@ async def status(ctx):
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit(
-            "Aucun jeton trouvé. Crée une application sur https://discord.com/developers/applications, "
-            "copie le jeton du bot dans un fichier 'token.txt' à côté de ce script "
-            "(ou dans la variable d'environnement DISCORD_BOT_TOKEN). Ne le partage avec personne.")
+            "No token found. Create an application at https://discord.com/developers/applications, "
+            "put the bot token in a file named 'token.txt' next to this script "
+            "(or in the DISCORD_BOT_TOKEN environment variable). Never share it with anyone.")
     bot.run(TOKEN)
