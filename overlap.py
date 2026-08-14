@@ -282,19 +282,35 @@ class Wallet:
         return "no track record available"
 
 
+# Le palmarès et le pseudo d'un wallet bougent lentement ; ses POSITIONS changent à
+# chaque trade. Recharger l'historique complet à chaque cycle doublait les requêtes
+# pour rien — à 2 min d'intervalle, cela dépasserait 3 000 appels/heure sur une API
+# publique. On garde donc l'historique en cache et on ne rafraîchit que les positions.
+_SLOW_TTL = 1800          # 30 min : bien plus court que la vitesse d'évolution d'un palmarès
+_slow_cache: dict[str, tuple[float, str, list | None]] = {}
+
+
 async def load_wallet(c: Client, addr: str, lb: dict | None) -> Wallet:
     positions = await c.get(f"{API}/positions?user={addr}&limit=500&sizeThreshold=1")
-    name = (lb or {}).get("userName") or ""
-    if not name or re.match(r"^0x[0-9a-fA-F]{40}", name):
-        prof = await c.get_or_none(f"{GAMMA}/public-profile?address={addr}")
-        name = ""
-        if prof:
-            n = prof.get("name") or ""
-            name = n if n and not re.match(r"^0x[0-9a-fA-F]{40}", n) else (prof.get("pseudonym") or "")
-    if not name:
-        name = addr[:6] + "…" + addr[-4:]
 
-    activity = await c.get_or_none(f"{API}/activity?user={addr}&limit={ACTIVITY_LIMIT}")
+    cached = _slow_cache.get(addr.lower())
+    if cached and time.time() - cached[0] < _SLOW_TTL:
+        name, activity = cached[1], cached[2]
+    else:
+        name = (lb or {}).get("userName") or ""
+        if not name or re.match(r"^0x[0-9a-fA-F]{40}", name):
+            prof = await c.get_or_none(f"{GAMMA}/public-profile?address={addr}")
+            name = ""
+            if prof:
+                n = prof.get("name") or ""
+                name = n if n and not re.match(r"^0x[0-9a-fA-F]{40}", n) else (prof.get("pseudonym") or "")
+        if not name:
+            name = addr[:6] + "…" + addr[-4:]
+        activity = await c.get_or_none(f"{API}/activity?user={addr}&limit={ACTIVITY_LIMIT}")
+        _slow_cache[addr.lower()] = (time.time(), name, activity)
+
+    # Le palmarès est recalculé à chaque fois : les positions perdantes, elles, viennent
+    # des données fraîches (c'est ce qui décide gagné/perdu).
     tr = track_record(activity, positions) if isinstance(activity, list) else None
     return Wallet(
         addr=addr, name=name, positions=positions,

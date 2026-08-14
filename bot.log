@@ -335,3 +335,23 @@ Traceback (most recent call last):
   File "/Users/kiwi/Desktop/polymarket-overlap-bot/venv/lib/python3.14/site-packages/discord/commands/core.py", line 140, in wrapped
     raise ApplicationCommandInvokeError(exc) from exc
 discord.errors.ApplicationCommandInvokeError: Application Command raised an exception: NotFound: 404 Not Found (error code: 10062): Unknown interaction
+watcher 20:50:24: 345 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+watcher 20:53:14: 339 marchés · 40 wallets (10 changements de classement ignorés) → 0 entrée(s) ACHETER, 7 sortie(s)
+watcher 20:54:32: 346 marchés · 50 wallets (10 changements de classement ignorés) → 1 entrée(s) ACHETER, 0 sortie(s)
+
+===== v10 (cycle 2 min + cache historique) 20:55:40 =====
+Connecté : Polymaket#6552 · surveillance toutes les 2 min
+Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
+Serveurs : ['Polymarket Overlap']
+Commandes sur « Polymarket Overlap » (7) : /best, /board, /guide, /status, /unwatch (réservée: 32), /wallet, /watch (réservée: 32)
+Commandes globales restantes : 0 (0 attendu, sinon doublons)
+watcher 20:56:57: 346 marchés · 50 wallets (0 changements de classement ignorés) → 1 entrée(s) ACHETER, 0 sortie(s)
+watcher: envoi impossible — 403 Forbidden (error code: 50013): Missing Permissions
+watcher 20:57:00: 346 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+watcher 20:58:50: 346 marchés · 50 wallets (0 changements de classement ignorés) → 0 entrée(s) ACHETER, 0 sortie(s)
+
+===== v11 (flux buys/exits separes) 20:59:57 =====
+Connecté : Polymaket#6552 · surveillance toutes les 2 min
+Lien d'invitation : https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=18432&scope=bot%20applications.commands
+Serveurs : ['Polymarket Overlap']
+Commandes sur « Polymarket Overlap » (8) : /best, /board, /guide, /status, /unwatch (réservée: 32), /wallet, /watch-buys (réservée: 32), /watch-exits (réservée: 32)

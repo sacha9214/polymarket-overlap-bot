@@ -10,7 +10,8 @@ Commandes :
   /board       installe le tableau vivant dans le salon
   /guide       poste le mode d'emploi (à épingler)
   /wallet      les paris et le palmarès d'une adresse
-  /watch       abonner ce salon aux alertes
+  /watch-buys  ce salon reçoit les ENTRÉES du smart money
+  /watch-exits ce salon reçoit les SORTIES
   /unwatch     désabonner ce salon
   /status      état de la surveillance
 
@@ -48,7 +49,7 @@ GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "0") or 0)
 GUILDS = [GUILD_ID] if GUILD_ID else None
 
 DB_PATH = Path(__file__).with_name("overlap.db")
-POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "20"))
+POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "2"))    # cycle court : cache l'historique
 PRESET_SIZE = int(os.environ.get("PRESET_SIZE", "50"))   # top 50 de la semaine
 DEFAULT_MIN_VALUE = 10_000     # n'alerte pas pour des miettes
 
@@ -61,6 +62,17 @@ db = sqlite3.connect(DB_PATH)
 db.execute("""CREATE TABLE IF NOT EXISTS subs(
   channel_id INTEGER PRIMARY KEY, guild_id INTEGER,
   min_value REAL DEFAULT 10000, created INTEGER)""")
+# Un salon s'abonne désormais à un TYPE d'alerte : « buys » ou « exits ». La clé porte
+# donc sur (salon, type), et un même salon peut prendre les deux s'il le veut.
+db.execute("""CREATE TABLE IF NOT EXISTS feeds(
+  channel_id INTEGER, kind TEXT, guild_id INTEGER,
+  min_value REAL DEFAULT 10000, created INTEGER,
+  PRIMARY KEY(channel_id, kind))""")
+# Reprise des abonnements de l'ancienne table : ils recevaient les deux flux.
+if not db.execute("SELECT 1 FROM feeds LIMIT 1").fetchone():
+    for ch_id, g_id, mv, cr in db.execute("SELECT channel_id, guild_id, min_value, created FROM subs"):
+        for k in ("buys", "exits"):
+            db.execute("INSERT OR IGNORE INTO feeds VALUES(?,?,?,?,?)", (ch_id, k, g_id, mv, cr))
 db.execute("""CREATE TABLE IF NOT EXISTS seen(
   key TEXT PRIMARY KEY, title TEXT, outcome TEXT, value REAL, ts INTEGER)""")
 # Qui détient quoi, wallet par wallet. Indispensable : le preset suit le top 50 de la
@@ -301,10 +313,10 @@ def compute_deltas(prev_hold: dict, cur_hold: dict, current: dict,
 
 @tasks.loop(minutes=POLL_MINUTES)
 async def watcher():
-    subs = db.execute("SELECT channel_id, min_value FROM subs").fetchall()
-    boards = db.execute("SELECT channel_id FROM board").fetchall()
-    if not subs and not boards:
-        return
+    feeds = db.execute("SELECT 1 FROM feeds LIMIT 1").fetchone()
+    boards = db.execute("SELECT 1 FROM board LIMIT 1").fetchone()
+    if not feeds and not boards:
+        return                                   # personne à prévenir : on n'appelle pas l'API
     try:
         wallets, markets = await get_analysis(force=True)
     except Exception as exc:
@@ -365,7 +377,9 @@ async def watcher():
           f"({churn} changements de classement ignorés) → "
           f"{len(entries)} entrée(s) ACHETER, {len(exits)} sortie(s)")
 
-    for channel_id, min_value in subs:
+    # Flux « buys » : uniquement les nouvelles entrées.
+    for channel_id, min_value in db.execute(
+            "SELECT channel_id, min_value FROM feeds WHERE kind='buys'").fetchall():
         ch = bot.get_channel(channel_id)
         if ch is None:
             continue
@@ -377,6 +391,12 @@ async def watcher():
             except Exception as exc:
                 print("watcher: envoi impossible —", exc)
 
+    # Flux « exits » : uniquement les liquidations.
+    for channel_id, min_value in db.execute(
+            "SELECT channel_id, min_value FROM feeds WHERE kind='exits'").fetchall():
+        ch = bot.get_channel(channel_id)
+        if ch is None:
+            continue
         big_exits = sorted((x for x in exits if (x[3] or 0) >= (min_value or 0)),
                            key=lambda x: -(x[3] or 0))
         if big_exits:
@@ -507,19 +527,43 @@ async def wallet(ctx, address: str):
     await ctx.respond(embed=e)
 
 
-@bot.slash_command(name="watch", description="Subscribe this channel to alerts", guild_ids=GUILDS)
+def subscribe(ctx, kind: str, threshold: int) -> None:
+    db.execute("INSERT OR REPLACE INTO feeds VALUES(?,?,?,?,?)",
+               (ctx.channel.id, kind, ctx.guild.id if ctx.guild else 0,
+                threshold, int(time.time())))
+    db.commit()
+
+
+@bot.slash_command(name="watch-buys",
+                   description="Send BUY alerts to this channel (smart money entering)",
+                   guild_ids=GUILDS)
 @discord.default_permissions(manage_guild=True)
 @discord.option("threshold", int, description="Only alert above this amount ($)",
                 min_value=0, default=DEFAULT_MIN_VALUE, required=False)
-async def watch(ctx, threshold: int):
+async def watch_buys(ctx, threshold: int):
     await ctx.defer()
-    db.execute("INSERT OR REPLACE INTO subs VALUES(?,?,?,?)",
-               (ctx.channel.id, ctx.guild.id if ctx.guild else 0, threshold, int(time.time())))
-    db.commit()
+    subscribe(ctx, "buys", threshold)
     await ctx.respond(
-        f"✅ This channel will get alerts: smart-money entries above "
-        f"**{ov.fmt_usd(threshold)}**, and their exits. Checked every {POLL_MINUTES} min.\n"
+        f"🟢 **Buy alerts enabled here.** You will get a card whenever tracked traders "
+        f"**open** a position worth more than **{ov.fmt_usd(threshold)}** and the verdict is BUY.\n"
+        f"Checked every {POLL_MINUTES} min · exits go to their own channel via `/watch-exits`.\n"
         f"_The first cycle is the baseline — alerts start from the next one._")
+
+
+@bot.slash_command(name="watch-exits",
+                   description="Send EXIT alerts to this channel (positions they closed)",
+                   guild_ids=GUILDS)
+@discord.default_permissions(manage_guild=True)
+@discord.option("threshold", int, description="Only alert above this amount ($)",
+                min_value=0, default=DEFAULT_MIN_VALUE, required=False)
+async def watch_exits(ctx, threshold: int):
+    await ctx.defer()
+    subscribe(ctx, "exits", threshold)
+    await ctx.respond(
+        f"🔴 **Exit alerts enabled here.** You will be told when tracked traders **close** "
+        f"a position that was worth more than **{ov.fmt_usd(threshold)}**.\n"
+        f"Checked every {POLL_MINUTES} min · buys go to their own channel via `/watch-buys`.\n"
+        f"_Only traders still in the tracked list count — a leaderboard reshuffle is not an exit._")
 
 
 @bot.slash_command(name="board",
@@ -615,20 +659,29 @@ async def guide(ctx):
 @discord.default_permissions(manage_guild=True)
 async def unwatch(ctx):
     await ctx.defer()
+    kinds = [k for (k,) in db.execute("SELECT kind FROM feeds WHERE channel_id=?",
+                                      (ctx.channel.id,))]
+    db.execute("DELETE FROM feeds WHERE channel_id=?", (ctx.channel.id,))
     db.execute("DELETE FROM subs WHERE channel_id=?", (ctx.channel.id,))
     db.commit()
-    await ctx.respond("🔕 Alerts switched off for this channel.")
+    if not kinds:
+        return await ctx.respond("This channel had no alerts enabled.")
+    label = " and ".join({"buys": "buy", "exits": "exit"}[k] for k in sorted(kinds))
+    await ctx.respond(f"🔕 {label.capitalize()} alerts switched off for this channel.")
 
 
 @bot.slash_command(name="status", description="Monitoring status", guild_ids=GUILDS)
 async def status(ctx):
     await ctx.defer()
-    n = db.execute("SELECT COUNT(*) FROM subs").fetchone()[0]
+    buys = db.execute("SELECT channel_id FROM feeds WHERE kind='buys'").fetchall()
+    exits = db.execute("SELECT channel_id FROM feeds WHERE kind='exits'").fetchall()
     tracked = db.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
     last = meta_get("last_run")
     ago = f"{int((time.time()-int(last))//60)} min ago" if last else "never"
     await ctx.respond(
-        f"**Monitoring**: {n} subscribed channel(s) · {tracked} markets tracked\n"
+        f"**Monitoring**: {tracked} markets tracked\n"
+        f"🟢 **Buy alerts** → {', '.join(f'<#{c}>' for (c,) in buys) or 'nowhere yet (`/watch-buys`)'}\n"
+        f"🔴 **Exit alerts** → {', '.join(f'<#{c}>' for (c,) in exits) or 'nowhere yet (`/watch-exits`)'}\n"
         f"**Last check**: {ago} · every {POLL_MINUTES} min · "
         f"top {PRESET_SIZE} traders of the week")
 
