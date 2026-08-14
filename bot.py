@@ -54,14 +54,20 @@ GUILDS = [GUILD_ID] if GUILD_ID else None
 # commandes (chacune efface celles de l'autre au démarrage) : elles disparaissent alors
 # du menu Discord. Elles doublent aussi les alertes et la charge sur l'API.
 _LOCK_PATH = Path(__file__).with_name("bot.lock")
-_lock_file = open(_LOCK_PATH, "w")
-try:
-    fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
-    sys.exit("Another instance is already running (bot.lock held). "
-             "Stop it first:  pkill -f bot.py")
-_lock_file.write(str(os.getpid()))
-_lock_file.flush()
+_lock_file = None
+
+
+def acquire_single_instance_lock():
+    """Pris au LANCEMENT seulement : le module doit rester importable pour les tests."""
+    global _lock_file
+    _lock_file = open(_LOCK_PATH, "w")
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("Another instance is already running (bot.lock held). "
+                 "Stop it first:  pkill -f bot.py")
+    _lock_file.write(str(os.getpid()))
+    _lock_file.flush()
 
 DB_PATH = Path(__file__).with_name("overlap.db")
 POLL_MINUTES = int(os.environ.get("POLL_MINUTES", "2"))    # cycle court : cache l'historique
@@ -69,6 +75,11 @@ PRESET_SIZE = int(os.environ.get("PRESET_SIZE", "50"))   # top 50 de la semaine
 DEFAULT_MIN_VALUE = 10_000     # n'alerte pas pour des miettes
 
 GREEN, RED, GREY, GOLD = 0x22C55E, 0xEF4444, 0x8B93A1, 0xEAB308
+
+# Droits demandés à l'invitation. /setup a besoin de créer des salons (16) et
+# d'épingler (8192) ; le reste sert à lire, écrire et modifier ses propres messages.
+# 16 + 1024 + 2048 + 8192 + 16384 + 65536
+INVITE_PERMS = 93200
 
 # ---------------------------------------------------------------------------
 # Base
@@ -238,6 +249,46 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
 # ---------------------------------------------------------------------------
 # Surveillance
 # ---------------------------------------------------------------------------
+def build_guide_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="📖 How to read this channel",
+        description="This channel tracks the **50 best Polymarket traders of the week** and "
+                    "flags the bets that **several of them land on together**.",
+        colour=GOLD)
+    e.add_field(
+        name="1️⃣ What is an \u201coverlap\u201d?",
+        value="A market where **at least 2 good traders bet on the same side**. "
+              "One trader alone can be wrong; when several good ones converge, "
+              "it is worth a look.", inline=False)
+    e.add_field(
+        name="2️⃣ The verdicts",
+        value="🟢 **BUY** — the tracked traders see this outcome as likelier than the market does\n"
+              "⚪ **WATCH** — their view matches the price, nothing special to gain\n"
+              "🔴 **AVOID** — those holding it usually lose, or entered badly\n"
+              "⚔️ **they disagree** — tracked traders contradict each other: weak signal", inline=False)
+    e.add_field(
+        name="3️⃣ The numbers",
+        value="**Price in ¢** = the market's probability (58¢ ≈ 58% chance). "
+              "It is also your cost: 58¢ staked pays $1 if you win.\n"
+              "**Estimated probability** = the same thing adjusted for *who* is positioned "
+              "(their track record, how much of their portfolio they put in, their entry price).\n"
+              "**$100 → +X** = what $100 would return if the bet lands.", inline=False)
+    e.add_field(
+        name="4️⃣ Over / Under",
+        value="These are not teams: it is the **match point total**. "
+              "\u201cOver 8.5\u201d = 9 points or more, both teams combined. "
+              "A single match has several lines (7.5, 8.5, 9.5…).", inline=False)
+    e.add_field(
+        name="5️⃣ Keep in mind",
+        value="These traders **lose bets too**. Copying is not winning: they enter at a price "
+              "you will not get, and they can exit without warning. "
+              "**Nothing here is financial advice** — only stake what you can afford to lose.",
+        inline=False)
+    e.set_footer(text="/board installs the live ranking · /best shows the top on demand "
+                      "· /wallet <address> analyses a portfolio")
+    return e
+
+
 def board_embed(markets: list) -> discord.Embed:
     """Le classement du moment, lisible d'un coup d'œil, sans jargon."""
     picks = [m for m in markets if ov.verdict(m)[0] == "buy"]
@@ -441,7 +492,7 @@ async def on_ready():
     # Permissions 18432 = Send Messages (2048) + Embed Links (16384).
     print("Invite link: "
           f"https://discord.com/oauth2/authorize?client_id={bot.user.id}"
-          "&permissions=18432&scope=bot%20applications.commands")
+          f"&permissions={INVITE_PERMS}&scope=bot%20applications.commands")
     print(f"Servers: {[g.name for g in bot.guilds] or 'none — use the invite link above'}")
 
     # Sans DISCORD_GUILD_ID, les commandes sont enregistrées globalement et Discord met
@@ -605,42 +656,7 @@ async def board(ctx):
                    guild_ids=GUILDS)
 async def guide(ctx):
     await ctx.defer()
-    e = discord.Embed(
-        title="📖 How to read this channel",
-        description="This channel tracks the **50 best Polymarket traders of the week** and "
-                    "flags the bets that **several of them land on together**.",
-        colour=GOLD)
-    e.add_field(
-        name="1️⃣ What is an \u201coverlap\u201d?",
-        value="A market where **at least 2 good traders bet on the same side**. "
-              "One trader alone can be wrong; when several good ones converge, "
-              "it is worth a look.", inline=False)
-    e.add_field(
-        name="2️⃣ The verdicts",
-        value="🟢 **BUY** — the tracked traders see this outcome as likelier than the market does\n"
-              "⚪ **WATCH** — their view matches the price, nothing special to gain\n"
-              "🔴 **AVOID** — those holding it usually lose, or entered badly\n"
-              "⚔️ **they disagree** — tracked traders contradict each other: weak signal", inline=False)
-    e.add_field(
-        name="3️⃣ The numbers",
-        value="**Price in ¢** = the market's probability (58¢ ≈ 58% chance). "
-              "It is also your cost: 58¢ staked pays $1 if you win.\n"
-              "**Estimated probability** = the same thing adjusted for *who* is positioned "
-              "(their track record, how much of their portfolio they put in, their entry price).\n"
-              "**$100 → +X** = what $100 would return if the bet lands.", inline=False)
-    e.add_field(
-        name="4️⃣ Over / Under",
-        value="These are not teams: it is the **match point total**. "
-              "\u201cOver 8.5\u201d = 9 points or more, both teams combined. "
-              "A single match has several lines (7.5, 8.5, 9.5…).", inline=False)
-    e.add_field(
-        name="5️⃣ Keep in mind",
-        value="These traders **lose bets too**. Copying is not winning: they enter at a price "
-              "you will not get, and they can exit without warning. "
-              "**Nothing here is financial advice** — only stake what you can afford to lose.",
-        inline=False)
-    e.set_footer(text="/board installs the live ranking · /best shows the top on demand "
-                      "· /wallet <address> analyses a portfolio")
+    e = build_guide_embed()
 
     # Réécrire le message existant s'il y en a un : sinon l'ancienne version reste
     # affichée dans le salon et deux guides cohabitent.
@@ -668,6 +684,115 @@ async def guide(ctx):
     db.commit()
     await ctx.respond("📖 Guide posted and pinned. Running /guide again will update "
                       "this same message instead of adding another one.", ephemeral=True)
+
+
+@bot.slash_command(name="setup",
+                   description="Create the full channel structure and wire everything up",
+                   guild_ids=GUILDS)
+@discord.default_permissions(manage_guild=True)
+async def setup(ctx):
+    await ctx.defer(ephemeral=True)
+    g = ctx.guild
+    if g is None:
+        return await ctx.respond("Run this in a server, not in a DM.", ephemeral=True)
+    me = g.me
+    if not me.guild_permissions.manage_channels:
+        return await ctx.respond(
+            "I need the **Manage Channels** permission to build the structure.\n"
+            "Either grant it to my role in Server Settings → Roles, or re-invite me with:\n"
+            f"https://discord.com/oauth2/authorize?client_id={bot.user.id}"
+            f"&permissions={INVITE_PERMS}&scope=bot%20applications.commands", ephemeral=True)
+
+    # Salons en lecture seule : tout le monde lit, seul le bot écrit. Un flux d'alertes
+    # où n'importe qui peut poster devient illisible en deux jours.
+    read_only = {
+        g.default_role: discord.PermissionOverwrite(send_messages=False, add_reactions=True),
+        me: discord.PermissionOverwrite(send_messages=True, manage_messages=True),
+    }
+
+    plan = [
+        ("how-it-works", "Read this first — what an overlap is and how to read the alerts", True),
+        ("best-overlaps", "Live ranking of the best overlaps, rewritten automatically", True),
+        ("buy-alerts", "Smart money OPENING a position (verdict BUY)", True),
+        ("exit-alerts", "Smart money CLOSING a position — as telling as a buy", True),
+        ("discussion", "Talk about the calls here — this one is open to everyone", False),
+    ]
+
+    cat = discord.utils.get(g.categories, name="POLYMARKET OVERLAP")
+    if cat is None:
+        cat = await g.create_category("POLYMARKET OVERLAP")
+
+    made, reused, chans = [], [], {}
+    for name, topic, locked in plan:
+        ch = discord.utils.get(g.text_channels, name=name)
+        if ch is None:
+            ch = await g.create_text_channel(
+                name, category=cat, topic=topic,
+                overwrites=read_only if locked else None)
+            made.append(ch)
+        else:
+            reused.append(ch)
+        chans[name] = ch
+
+    # Guide épinglé
+    guide_ch = chans["how-it-works"]
+    e = build_guide_embed()
+    row = db.execute("SELECT message_id FROM guides WHERE channel_id=?", (guide_ch.id,)).fetchone()
+    msg = None
+    if row:
+        try:
+            msg = await guide_ch.fetch_message(row[0])
+            await msg.edit(embed=e)
+        except discord.NotFound:
+            msg = None
+    if msg is None:
+        msg = await guide_ch.send(embed=e)
+        try:
+            await msg.pin()
+        except discord.Forbidden:
+            pass
+    db.execute("INSERT OR REPLACE INTO guides VALUES(?,?,?)",
+               (guide_ch.id, msg.id, int(time.time())))
+
+    # Tableau vivant
+    board_ch = chans["best-overlaps"]
+    _, markets = await get_analysis()
+    row = db.execute("SELECT message_id FROM board WHERE channel_id=?", (board_ch.id,)).fetchone()
+    bmsg = None
+    if row:
+        try:
+            bmsg = await board_ch.fetch_message(row[0])
+            await bmsg.edit(embed=board_embed(markets))
+        except discord.NotFound:
+            bmsg = None
+    if bmsg is None:
+        bmsg = await board_ch.send(embed=board_embed(markets))
+        try:
+            await bmsg.pin()
+        except discord.Forbidden:
+            pass
+    db.execute("INSERT OR REPLACE INTO board VALUES(?,?,?)",
+               (board_ch.id, bmsg.id, int(time.time())))
+
+    # Abonnements des deux flux
+    for name, kind in (("buy-alerts", "buys"), ("exit-alerts", "exits")):
+        db.execute("INSERT OR REPLACE INTO feeds VALUES(?,?,?,?,?)",
+                   (chans[name].id, kind, g.id, DEFAULT_MIN_VALUE, int(time.time())))
+    db.commit()
+
+    lines = [f"**Setup complete.**",
+             f"📖 {guide_ch.mention} — guide posted and pinned",
+             f"🏆 {board_ch.mention} — live board, rewritten every {POLL_MINUTES} min",
+             f"🟢 {chans['buy-alerts'].mention} — buy alerts above {ov.fmt_usd(DEFAULT_MIN_VALUE)}",
+             f"🔴 {chans['exit-alerts'].mention} — exit alerts above {ov.fmt_usd(DEFAULT_MIN_VALUE)}",
+             f"💬 {chans['discussion'].mention} — open to everyone"]
+    if made:
+        lines.append(f"\nCreated: {', '.join(c.mention for c in made)}")
+    if reused:
+        lines.append(f"Reused existing: {', '.join(c.mention for c in reused)}")
+    lines.append("\nAlert channels are read-only for members (reactions still allowed). "
+                 "Change a threshold anytime with `/watch-buys` or `/watch-exits` in that channel.")
+    await ctx.respond("\n".join(lines), ephemeral=True)
 
 
 @bot.slash_command(name="unwatch", description="Unsubscribe this channel", guild_ids=GUILDS)
@@ -702,6 +827,7 @@ async def status(ctx):
 
 
 if __name__ == "__main__":
+    acquire_single_instance_lock()
     if not TOKEN:
         raise SystemExit(
             "No token found. Create an application at https://discord.com/developers/applications, "

@@ -439,3 +439,14 @@ Servers: ['Polymarket Overlap']
 Commands on “Polymarket Overlap” (8): /best, /board, /guide, /status, /unwatch (restricted: 32), /wallet, /watch-buys (restricted: 32), /watch-exits (restricted: 32)
 Global commands left: 0 (expect 0, otherwise duplicates)
 watcher 21:05:50: 345 markets · 50 wallets (0 leaderboard changes ignored) → 0 BUY entries, 0 exit(s)
+watcher 21:07:44: 345 markets · 50 wallets (0 leaderboard changes ignored) → 0 BUY entries, 1 exit(s)
+watcher 21:09:43: 345 markets · 50 wallets (0 leaderboard changes ignored) → 0 BUY entries, 0 exit(s)
+watcher 21:11:43: 345 markets · 50 wallets (0 leaderboard changes ignored) → 0 BUY entries, 0 exit(s)
+
+===== v13 (/setup structure complete) 21:13:16 =====
+Connected: Polymaket#6552 · watching every 2 min
+Invite link: https://discord.com/oauth2/authorize?client_id=1537586531110232174&permissions=93200&scope=bot%20applications.commands
+Servers: ['Polymarket Overlap']
+Commands on “Polymarket Overlap” (9): /best, /board, /guide, /setup (restricted: 32), /status, /unwatch (restricted: 32), /wallet, /watch-buys (restricted: 32), /watch-exits (restricted: 32)
+Global commands left: 0 (expect 0, otherwise duplicates)
+watcher 21:14:33: 347 markets · 50 wallets (0 leaderboard changes ignored) → 1 BUY entry, 0 exit(s)
