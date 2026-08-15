@@ -657,6 +657,7 @@ async def marketmakers(ctx, mode: str):
     description="Always follow this trader, even outside the weekly top 50",
     guild_ids=GUILDS,
 )
+@discord.option("profile", str, description="Profile URL, username, or 0x address")
 async def track(ctx, profile: str):
     await ctx.defer(ephemeral=True)
     u = await ov.resolve_profile(profile)
@@ -687,6 +688,7 @@ async def track(ctx, profile: str):
 @bot.slash_command(
     name="untrack", description="Stop following a pinned trader", guild_ids=GUILDS
 )
+@discord.option("profile", str, description="Username or 0x address to unpin")
 async def untrack(ctx, profile: str):
     await ctx.defer(ephemeral=True)
     key = profile.strip().lower().lstrip("@")
