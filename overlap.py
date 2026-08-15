@@ -262,6 +262,12 @@ class Wallet:
     lb: dict | None
     quality: float
     group: int = -1
+    mm_score: int = 0          # 0 à 4 — voir market_maker_score()
+    mm_reasons: list = field(default_factory=list)
+
+    @property
+    def is_market_maker(self) -> bool:
+        return self.mm_score >= MM_THRESHOLD
 
     @property
     def last_buy(self) -> dict:
@@ -312,12 +318,84 @@ async def load_wallet(c: Client, addr: str, lb: dict | None) -> Wallet:
     # Le palmarès est recalculé à chaque fois : les positions perdantes, elles, viennent
     # des données fraîches (c'est ce qui décide gagné/perdu).
     tr = track_record(activity, positions) if isinstance(activity, list) else None
+    mm_score, mm_reasons = market_maker_score(
+        positions, activity if isinstance(activity, list) else None
+    )
     return Wallet(
         addr=addr, name=name, positions=positions,
         portfolio=sum(p.get("currentValue") or 0 for p in positions),
         open_pnl=sum(p.get("cashPnl") or 0 for p in positions),
         tr=tr, lb=lb, quality=wallet_quality(tr, lb),
+        mm_score=mm_score, mm_reasons=mm_reasons,
     )
+
+
+# ---------------------------------------------------------------------------
+# Détection des market makers
+# ---------------------------------------------------------------------------
+# Un market maker n'a pas d'avis : il cote des deux côtés et encaisse le spread.
+# Ses positions sont un STOCK, pas une conviction. Les traiter comme un signal
+# revient à croire qu'il « parie » alors qu'il absorbe simplement le flux des
+# autres — et comme il détient des centaines de positions, il pèse lourd dans
+# le calcul d'overlap tout en n'exprimant rien.
+#
+# Étalonné sur RN1 (4e all-time, 12,8 M$ de gains) : 773 trades/heure, taille
+# médiane de trade 17 $, 52 marchés touchés en 36 minutes, plus grosse position
+# à 1,5 % du capital, et les deux côtés tenus sur 38 événements.
+
+MM_THRESHOLD = 3                # nombre de critères à cocher pour être signalé
+MM_MAX_TRADE_USD = 100.0        # fills minuscules alors que les positions sont grosses
+MM_MIN_MARKETS_PER_HOUR = 10.0  # il quote partout à la fois
+MM_MAX_TOP_SHARE = 0.05         # aucune position ne dépasse 5 % du capital
+MM_MIN_BOTH_SIDES = 3           # tient les deux côtés d'un même événement
+
+
+def market_maker_score(positions: list, activity: list | None) -> tuple[int, list[str]]:
+    """Combien de signatures de market making ce portefeuille présente-t-il ?
+
+    Chaque critère est mesurable sans rien deviner. Un trader directionnel n'en
+    coche normalement aucun ; RN1 les coche tous les quatre.
+    """
+    reasons: list[str] = []
+    positions = positions or []
+    if len(positions) < 20:
+        return 0, reasons        # trop peu de matière pour conclure
+
+    # 1. Des fills minuscules pour des positions grosses = exécution algorithmique.
+    if activity:
+        sizes = sorted(a.get("usdcSize") or 0 for a in activity)
+        if sizes:
+            med_trade = sizes[len(sizes) // 2]
+            med_pos = sorted((p.get("initialValue") or 0) for p in positions)[len(positions) // 2]
+            if med_trade < MM_MAX_TRADE_USD and med_pos > med_trade * 20:
+                reasons.append(f"fills de {med_trade:.0f} $ pour des positions de {med_pos:,.0f} $")
+
+    # 2. Beaucoup de marchés distincts par heure = il cote, il ne choisit pas.
+    if activity and len(activity) > 50:
+        ts = [a.get("timestamp") or 0 for a in activity]
+        span_h = (max(ts) - min(ts)) / 3600 if max(ts) > min(ts) else 0
+        if span_h > 0.05:
+            n_markets = len({a.get("eventSlug") for a in activity})
+            per_hour = n_markets / span_h
+            if per_hour >= MM_MIN_MARKETS_PER_HOUR:
+                reasons.append(f"{per_hour:.0f} marchés touchés par heure")
+
+    # 3. Aucune conviction : la plus grosse position reste marginale.
+    vals = sorted(((p.get("initialValue") or 0) for p in positions), reverse=True)
+    total = sum(vals)
+    if total > 0 and vals[0] / total <= MM_MAX_TOP_SHARE:
+        reasons.append(f"plus grosse position à {100*vals[0]/total:.1f} % du capital")
+
+    # 4. Les deux côtés du même événement : impossible pour qui a un avis.
+    by_event: dict = {}
+    for p in positions:
+        by_event.setdefault(p.get("eventSlug"), set()).add(p.get("outcome"))
+    both = sum(1 for o in by_event.values()
+               if {"Over", "Under"} <= o or {"Yes", "No"} <= o)
+    if both >= MM_MIN_BOTH_SIDES:
+        reasons.append(f"deux côtés tenus sur {both} événements")
+
+    return len(reasons), reasons
 
 
 def detect_twins(ws: list[Wallet]) -> None:
@@ -457,7 +535,7 @@ async def leaderboard(c: Client, period: str = "week", limit: int = 50) -> list[
 
 
 async def analyze(addresses: list[str], lb_by_addr: dict | None = None,
-                  concurrency: int = 4) -> tuple[list[Wallet], list[dict]]:
+                  concurrency: int = 4, exclude_mm: bool = False) -> tuple[list[Wallet], list[dict]]:
     lb_by_addr = lb_by_addr or {}
     async with aiohttp.ClientSession() as s:
         c = Client(s)
@@ -473,7 +551,11 @@ async def analyze(addresses: list[str], lb_by_addr: dict | None = None,
         ws = [w for w in await asyncio.gather(*(one(a) for a in addresses)) if w]
 
     detect_twins(ws)
-    markets = [metrics(m) for m in compute_overlaps(ws)]
+    # `exclude_mm` retire les market makers du CALCUL d'overlap. Ils restent dans
+    # `ws` pour rester consultables via /wallet : on les écarte du signal, on ne
+    # les efface pas.
+    pool = [w for w in ws if not w.is_market_maker] if exclude_mm else ws
+    markets = [metrics(m) for m in compute_overlaps(pool)]
     markets.sort(key=lambda m: (m["evTime"], m["totalValue"]), reverse=True)
     return ws, markets
 
@@ -512,7 +594,8 @@ async def resolve_profile(text: str) -> dict | None:
 
 
 async def analyze_preset(period: str = "week", limit: int = 50,
-                         pinned: list[str] | None = None):
+                         pinned: list[str] | None = None,
+                         exclude_mm: bool = False):
     """Palmarès de la période, plus d'éventuels wallets suivis en permanence."""
     pinned = [a.lower() for a in (pinned or []) if a]
     async with aiohttp.ClientSession() as s:
@@ -534,7 +617,7 @@ async def analyze_preset(period: str = "week", limit: int = 50,
     addrs = [u["proxyWallet"] for u in lb]
     known = {a.lower() for a in addrs}
     addrs += [a for a in pinned if a not in known]
-    return await analyze(addrs, by_addr)
+    return await analyze(addrs, by_addr, exclude_mm=exclude_mm)
 
 
 # ---------------------------------------------------------------------------

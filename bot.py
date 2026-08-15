@@ -187,6 +187,20 @@ async def ensure_channel(guild, cat, key, display, topic, overwrites):
 db.commit()
 
 
+# "flag" (défaut) : les market makers sont signalés, rien n'est retiré.
+# "exclude"        : ils sortent du calcul d'overlap.
+# "off"            : comportement d'avant le détecteur, à l'identique.
+def mm_mode() -> str:
+    return meta_get("mm_mode", "flag") or "flag"
+
+
+def mm_badge(w) -> str:
+    """Marqueur affiché à côté d'un trader dont les positions sont un stock."""
+    if mm_mode() == "off" or not getattr(w, "is_market_maker", False):
+        return ""
+    return " 🤖"
+
+
 def pinned_addrs() -> list[str]:
     return [r[0] for r in db.execute("SELECT addr FROM pinned").fetchall()]
 
@@ -289,7 +303,7 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
             pct = (h["value"] / w.portfolio * 100) if getattr(w, "portfolio", 0) else 0
             pct_txt = f"{pct:.0f}%" if pct >= 1 else (f"{pct:.1f}%" if pct >= 0.1 else "<0.1%")
             rows.append(
-                f"**{w.name}**\n"
+                f"**{w.name}**{mm_badge(w)}\n"
                 f"💵 {ov.fmt_usd(invested)} at {round((h['avg'] or 0)*100)}¢ → "
                 f"{ov.fmt_usd(h['value'])} ({'+' if perf >= 0 else '−'}{abs(round(perf*100))}%) "
                 f"· {pct_txt} of their portfolio\n"
@@ -601,6 +615,43 @@ async def on_ready():
 # Sous Python 3.14 les annotations sont évaluées paresseusement (PEP 649) et
 # py-cord les lisait comme du texte : toutes les options devenaient des chaînes
 # obligatoires. Le décorateur ne dépend pas des annotations.
+@bot.slash_command(
+    name="marketmakers",
+    description="How to handle market makers in the analysis",
+    guild_ids=GUILDS,
+)
+@discord.default_permissions(manage_guild=True)
+@discord.option("mode", str, description="off, flag or exclude",
+                choices=["off", "flag", "exclude"], default="", required=False)
+async def marketmakers(ctx, mode: str):
+    await ctx.defer(ephemeral=True)
+    mode = (mode or "").strip().lower()
+
+    if mode not in {"off", "flag", "exclude"}:
+        return await ctx.respond(
+            f"Current mode: **{mm_mode()}**\n\n"
+            "A market maker has no view — they quote both sides and collect the "
+            "spread. Their positions are **inventory, not conviction**, so "
+            "reading them as smart money is misleading.\n\n"
+            "`off` — no detection (exactly how it worked before)\n"
+            "`flag` — mark them 🤖 in alerts, change nothing else\n"
+            "`exclude` — drop them from the overlap calculation\n\n"
+            "Reference: RN1, #4 all-time, ticks every box — 773 trades/hour, "
+            "$17 median fill, biggest position 1.5% of capital, both sides held "
+            "on 38 events.",
+            ephemeral=True,
+        )
+
+    meta_set("mm_mode", mode)
+    txt = {
+        "off": "🔕 Detection off — exactly the behaviour from before this feature.",
+        "flag": "🤖 Market makers will be marked in alerts. Nothing is removed.",
+        "exclude": "🚫 Market makers are dropped from the overlap calculation. "
+                   "They stay visible via `/wallet`.",
+    }[mode]
+    await ctx.respond(f"{txt}\nTakes effect on the next cycle.", ephemeral=True)
+
+
 @bot.slash_command(
     name="track",
     description="Always follow this trader, even outside the weekly top 50",
