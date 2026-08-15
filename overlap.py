@@ -478,11 +478,63 @@ async def analyze(addresses: list[str], lb_by_addr: dict | None = None,
     return ws, markets
 
 
-async def analyze_preset(period: str = "week", limit: int = 50):
+async def resolve_profile(text: str) -> dict | None:
+    """Retrouve un trader depuis une URL, un pseudo ou une adresse.
+
+    La recherche publique de Gamma ne renvoie rien sur les pseudos de traders
+    (testé : `public-search?q=rn1` → 0 résultat). En revanche les classements
+    exposent `userName`, donc on y cherche — d'abord la semaine, puis l'historique
+    complet, ce qui couvre aussi les gros traders absents du palmarès courant.
+    """
+    t = (text or "").strip()
+    t = re.sub(r"^https?://(www\.)?polymarket\.com/", "", t, flags=re.I)
+    t = t.lstrip("@/").split("/")[0].split("?")[0].strip()
+    if not t:
+        return None
+
+    if re.fullmatch(r"0x[0-9a-fA-F]{40}", t):
+        addr = t.lower()
+        async with aiohttp.ClientSession() as s:
+            c = Client(s)
+            for period in ("week", "all"):
+                for u in (await leaderboard(c, period, 50)) or []:
+                    if (u.get("proxyWallet") or "").lower() == addr:
+                        return u
+        return {"proxyWallet": addr, "userName": ""}
+
     async with aiohttp.ClientSession() as s:
-        lb = await leaderboard(Client(s), period, limit)
-    by_addr = {u["proxyWallet"].lower(): u for u in lb}
-    return await analyze([u["proxyWallet"] for u in lb], by_addr)
+        c = Client(s)
+        for period in ("week", "all"):
+            for u in (await leaderboard(c, period, 50)) or []:
+                if (u.get("userName") or "").lower() == t.lower():
+                    return u
+    return None
+
+
+async def analyze_preset(period: str = "week", limit: int = 50,
+                         pinned: list[str] | None = None):
+    """Palmarès de la période, plus d'éventuels wallets suivis en permanence."""
+    pinned = [a.lower() for a in (pinned or []) if a]
+    async with aiohttp.ClientSession() as s:
+        c = Client(s)
+        lb = await leaderboard(c, period, limit) or []
+        by_addr = {u["proxyWallet"].lower(): u for u in lb}
+
+        missing = [a for a in pinned if a not in by_addr]
+        if missing:
+            # Un épinglé absent du palmarès de la période n'a aucune donnée de
+            # gains, et `wallet_quality` le noterait alors au plus bas — ce qui
+            # le ferait disparaître du classement alors qu'on l'a justement
+            # demandé. On va chercher sa fiche dans le classement historique.
+            for u in (await leaderboard(c, "all", 50)) or []:
+                a = (u.get("proxyWallet") or "").lower()
+                if a in missing:
+                    by_addr[a] = u
+
+    addrs = [u["proxyWallet"] for u in lb]
+    known = {a.lower() for a in addrs}
+    addrs += [a for a in pinned if a not in known]
+    return await analyze(addrs, by_addr)
 
 
 # ---------------------------------------------------------------------------

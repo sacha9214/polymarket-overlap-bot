@@ -123,6 +123,11 @@ db.execute("""CREATE TABLE IF NOT EXISTS guides(
 # Salons retenus par IDENTIFIANT, pas par nom : un identifiant survit aux
 # renommages, un nom non. Sans ça, renommer « buy-alerts » en « buy-alerts🚨 »
 # fait que /setup ne le reconnaît plus et en recrée un doublon à côté.
+# Wallets suivis en permanence, en plus du top 50 hebdomadaire. Un très bon
+# trader peut être absent du palmarès de la semaine (RN1 est 4e all-time mais
+# n'y figurait pas) : sans épinglage, on le perd de vue.
+db.execute("""CREATE TABLE IF NOT EXISTS pinned(
+  addr TEXT PRIMARY KEY, label TEXT, added INTEGER)""")
 db.execute("""CREATE TABLE IF NOT EXISTS channels(
   guild_id INTEGER, key TEXT, channel_id INTEGER,
   PRIMARY KEY(guild_id, key))""")
@@ -182,6 +187,10 @@ async def ensure_channel(guild, cat, key, display, topic, overwrites):
 db.commit()
 
 
+def pinned_addrs() -> list[str]:
+    return [r[0] for r in db.execute("SELECT addr FROM pinned").fetchall()]
+
+
 def meta_get(k, default=None):
     r = db.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
     return r[0] if r else default
@@ -207,7 +216,7 @@ async def get_analysis(force: bool = False):
     async with _lock:
         if not force and time.time() - _cache["ts"] < CACHE_TTL and _cache["markets"]:
             return _cache["wallets"], _cache["markets"]
-        ws, ms = await ov.analyze_preset("week", PRESET_SIZE)
+        ws, ms = await ov.analyze_preset("week", PRESET_SIZE, pinned=pinned_addrs())
         _cache.update(ts=time.time(), wallets=ws, markets=ms)
         return ws, ms
 
@@ -592,6 +601,76 @@ async def on_ready():
 # Sous Python 3.14 les annotations sont évaluées paresseusement (PEP 649) et
 # py-cord les lisait comme du texte : toutes les options devenaient des chaînes
 # obligatoires. Le décorateur ne dépend pas des annotations.
+@bot.slash_command(
+    name="track",
+    description="Always follow this trader, even outside the weekly top 50",
+    guild_ids=GUILDS,
+)
+async def track(ctx, profile: str):
+    await ctx.defer(ephemeral=True)
+    u = await ov.resolve_profile(profile)
+    if not u:
+        return await ctx.respond(
+            f"❌ Couldn't find **{profile}**.\n"
+            "Give a profile URL (`https://polymarket.com/@name`), a username, or "
+            "a `0x…` address. Usernames only resolve for traders who appear in a "
+            "leaderboard — otherwise paste the address.",
+            ephemeral=True,
+        )
+    addr = u["proxyWallet"].lower()
+    name = u.get("userName") or addr[:6] + "…" + addr[-4:]
+    db.execute("INSERT OR REPLACE INTO pinned VALUES(?,?,?)",
+               (addr, name, int(time.time())))
+    db.commit()
+
+    pnl = u.get("pnl")
+    extra = f"\nAll-time P&L on the leaderboard: **{ov.fmt_usd(pnl)}**" if pnl else ""
+    await ctx.respond(
+        f"✅ Now tracking **{name}** (`{addr[:10]}…`).{extra}\n"
+        f"They'll be analysed every cycle alongside the weekly top {PRESET_SIZE}, "
+        "whether or not they're in it.\nTakes effect on the next cycle.",
+        ephemeral=True,
+    )
+
+
+@bot.slash_command(
+    name="untrack", description="Stop following a pinned trader", guild_ids=GUILDS
+)
+async def untrack(ctx, profile: str):
+    await ctx.defer(ephemeral=True)
+    key = profile.strip().lower().lstrip("@")
+    row = db.execute(
+        "SELECT addr, label FROM pinned WHERE addr=? OR LOWER(label)=?", (key, key)
+    ).fetchone()
+    if not row:
+        return await ctx.respond(f"❌ **{profile}** isn't pinned.", ephemeral=True)
+    db.execute("DELETE FROM pinned WHERE addr=?", (row[0],))
+    db.commit()
+    await ctx.respond(f"🔕 Stopped tracking **{row[1]}**.", ephemeral=True)
+
+
+@bot.slash_command(
+    name="tracked", description="Traders pinned on top of the weekly top 50",
+    guild_ids=GUILDS,
+)
+async def tracked(ctx):
+    await ctx.defer(ephemeral=True)
+    rows = db.execute("SELECT label, addr FROM pinned ORDER BY added").fetchall()
+    if not rows:
+        return await ctx.respond(
+            "No pinned traders. The bot follows the weekly top "
+            f"{PRESET_SIZE} only.\nAdd one with `/track <profile url>`.",
+            ephemeral=True,
+        )
+    lines = [f"• **{l}** — [`{a[:10]}…`](https://polymarket.com/profile/{a})"
+             for l, a in rows]
+    await ctx.respond(
+        f"**{len(rows)} pinned trader(s)**, followed every cycle on top of the "
+        f"weekly top {PRESET_SIZE}:\n" + "\n".join(lines),
+        ephemeral=True,
+    )
+
+
 @bot.slash_command(name="best", description="The best entries right now", guild_ids=GUILDS)
 @discord.option("count", int, description="How many to show (1-5)",
                 min_value=1, max_value=5, default=3, required=False)
