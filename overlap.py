@@ -398,6 +398,53 @@ def market_maker_score(positions: list, activity: list | None) -> tuple[int, lis
     return len(reasons), reasons
 
 
+async def load_one(addr_or_profile: str) -> Wallet | None:
+    """Charge un seul trader, en dehors de tout palmarès.
+
+    Le pipeline habituel ne connaît que le top 50 : suivre quelqu'un dans son
+    propre salon ne doit pas l'obliger à entrer dans l'analyse d'overlap.
+    """
+    u = await resolve_profile(addr_or_profile)
+    if not u:
+        return None
+    addr = u["proxyWallet"]
+    async with aiohttp.ClientSession() as s:
+        return await load_wallet(Client(s), addr, u)
+
+
+def style_summary(w: Wallet) -> dict:
+    """Chiffres qui décrivent COMMENT il trade, pas ce qu'il gagne."""
+    pos = w.positions or []
+    vals = sorted(((p.get("initialValue") or 0) for p in pos), reverse=True)
+    total = sum(vals) or 1.0
+    prices = sorted((p.get("avgPrice") or 0) for p in pos if p.get("avgPrice"))
+    themes: dict = {}
+    for p in pos:
+        t = (p.get("title") or "").lower() + " " + (p.get("eventSlug") or "").lower()
+        k = "other"
+        for name, words in (
+            ("sport", ("vs.", "vs-", "nba", "nfl", "soccer", "football", "tennis",
+                       "ufc", "mlb", "match", "cup", "league")),
+            ("crypto", ("bitcoin", "ethereum", "btc", "eth", "solana", "crypto")),
+            ("politics", ("election", "president", "senate", "trump", "governor",
+                          "primary", "congress")),
+            ("world", ("ukraine", "russia", "israel", "gaza", "china", "nato",
+                       "war", "ceasefire", "iran")),
+            ("macro", ("fed", "inflation", "gdp", "rate", "recession", "cpi")),
+        ):
+            if any(x in t for x in words):
+                k = name
+                break
+        themes[k] = themes.get(k, 0) + (p.get("initialValue") or 0)
+    return {
+        "n": len(pos),
+        "capital": total,
+        "top_share": (vals[0] / total) if vals else 0.0,
+        "median_entry": prices[len(prices) // 2] if prices else 0.0,
+        "themes": sorted(themes.items(), key=lambda x: -x[1])[:3],
+    }
+
+
 def detect_twins(ws: list[Wallet]) -> None:
     """Deux portefeuilles quasi identiques = probablement la même personne : une seule voix."""
     sets = [{f"{p.get('conditionId')}|{p.get('outcome')}" for p in w.positions} for w in ws]

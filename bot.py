@@ -126,6 +126,11 @@ db.execute("""CREATE TABLE IF NOT EXISTS guides(
 # Wallets suivis en permanence, en plus du top 50 hebdomadaire. Un très bon
 # trader peut être absent du palmarès de la semaine (RN1 est 4e all-time mais
 # n'y figurait pas) : sans épinglage, on le perd de vue.
+# Un salon dédié à UN trader : message unique réécrit en place. Un flux de ses
+# trades serait illisible — RN1 en fait 773 à l'heure, à 17 $ pièce.
+db.execute("""CREATE TABLE IF NOT EXISTS traderboard(
+  channel_id INTEGER PRIMARY KEY, addr TEXT, label TEXT,
+  message_id INTEGER, updated INTEGER)""")
 db.execute("""CREATE TABLE IF NOT EXISTS pinned(
   addr TEXT PRIMARY KEY, label TEXT, added INTEGER)""")
 db.execute("""CREATE TABLE IF NOT EXISTS channels(
@@ -527,6 +532,40 @@ async def watcher():
           f"({churn} leaderboard changes ignored) → "
           f"{len(entries)} BUY entr{'y' if len(entries)==1 else 'ies'}, {len(exits)} exit(s)")
 
+    # Tableaux de traders suivis dans leur propre salon. Chargés à part : suivre
+    # quelqu'un dans un salon ne doit pas l'obliger à entrer dans l'analyse
+    # d'overlap, où ses positions pèseraient sur le signal des autres.
+    for channel_id, addr, msg_id in db.execute(
+            "SELECT channel_id, addr, message_id FROM traderboard").fetchall():
+        ch = bot.get_channel(channel_id)
+        if ch is None:
+            continue
+        try:
+            w = await ov.load_one(addr)
+            if not w:
+                continue
+            emb = trader_embed(w)
+            msg = None
+            if msg_id:
+                try:
+                    msg = await ch.fetch_message(msg_id)
+                    await msg.edit(embed=emb)
+                except discord.NotFound:
+                    msg = None
+            if msg is None:
+                msg = await ch.send(embed=emb)
+                try:
+                    await msg.pin()
+                except discord.DiscordException:
+                    pass
+                db.execute("UPDATE traderboard SET message_id=? WHERE channel_id=?",
+                           (msg.id, channel_id))
+            db.execute("UPDATE traderboard SET updated=? WHERE channel_id=?",
+                       (int(time.time()), channel_id))
+            db.commit()
+        except discord.DiscordException as exc:
+            print(f"watcher: trader board failed on {channel_id} — {exc}")
+
     # Flux « buys » : uniquement les nouvelles entrées.
     for channel_id, min_value in db.execute(
             "SELECT channel_id, min_value FROM feeds WHERE kind='buys'").fetchall():
@@ -608,6 +647,74 @@ async def on_ready():
         watcher.start()
 
 
+def trader_embed(w) -> discord.Embed:
+    """Portrait d'un trader : ce qu'il détient et COMMENT il opère.
+
+    Le PnL des positions ouvertes est volontairement absent. Les perdantes
+    restent indéfiniment dans le portefeuille à zéro tandis que les gagnantes
+    disparaissent une fois encaissées : la somme affichée serait très négative
+    pour n'importe quel trader, y compris excellent. RN1 y afficherait −4,0 M$
+    alors qu'il a gagné 12,8 M$. Seul le palmarès donne un chiffre fiable.
+    """
+    st = ov.style_summary(w)
+    mm = getattr(w, "is_market_maker", False)
+
+    e = discord.Embed(
+        title=f"👤 {w.name}{' 🤖' if mm else ''}",
+        url=f"https://polymarket.com/profile/{w.addr}",
+        color=0xF1C40F if mm else 0x3498DB,
+    )
+
+    lb_pnl = (w.lb or {}).get("pnl")
+    rank = (w.lb or {}).get("rank")
+    head = []
+    if lb_pnl is not None:
+        head.append(f"Leaderboard P&L **{ov.fmt_usd(lb_pnl)}**")
+    if rank:
+        head.append(f"rank #{rank}")
+    head.append(f"portfolio **{ov.fmt_usd(w.portfolio)}**")
+    e.description = " · ".join(head)
+
+    e.add_field(name="Open positions", value=f"{st['n']}", inline=True)
+    e.add_field(name="Capital deployed", value=ov.fmt_usd(st["capital"]), inline=True)
+    e.add_field(name="Biggest position", value=f"{100*st['top_share']:.1f}% of it", inline=True)
+    e.add_field(name="Median entry", value=f"{st['median_entry']:.3f}", inline=True)
+    e.add_field(
+        name="Where the money is",
+        value=" · ".join(f"{k} {ov.fmt_usd(v)}" for k, v in st["themes"]) or "—",
+        inline=True,
+    )
+
+    top = sorted(w.positions or [], key=lambda p: -(p.get("initialValue") or 0))[:5]
+    if top:
+        lines = [
+            f"`{ov.fmt_usd(p.get('initialValue') or 0):>7}` @ "
+            f"{round((p.get('avgPrice') or 0)*100)}¢ · **{p.get('outcome')}** — "
+            f"{(p.get('title') or '')[:52]}"
+            for p in top
+        ]
+        e.add_field(name="Largest positions", value="\n".join(lines)[:1024], inline=False)
+
+    if mm:
+        e.add_field(
+            name="🤖 Reads as a market maker",
+            value=(
+                "Quotes both sides and collects the spread rather than taking a "
+                "view. These positions are **inventory, not conviction** — when "
+                "they open a NO, it usually means retail bought YES and they "
+                "absorbed it. Don't read them as signals."
+            ),
+            inline=False,
+        )
+
+    e.set_footer(
+        text=f"Rewritten every {POLL_MINUTES} min · open-position P&L is omitted "
+        "on purpose: losers pile up, winners are redeemed and vanish"
+    )
+    e.timestamp = discord.utils.utcnow()
+    return e
+
+
 # ---------------------------------------------------------------------------
 # Commandes
 # ---------------------------------------------------------------------------
@@ -650,6 +757,68 @@ async def marketmakers(ctx, mode: str):
                    "They stay visible via `/wallet`.",
     }[mode]
     await ctx.respond(f"{txt}\nTakes effect on the next cycle.", ephemeral=True)
+
+
+@bot.slash_command(
+    name="trader-board",
+    description="Follow one trader in this channel with a live board",
+    guild_ids=GUILDS,
+)
+@discord.option("profile", str, description="Profile URL, username, or 0x address")
+async def trader_board(ctx, profile: str):
+    await ctx.defer(ephemeral=True)
+    w = await ov.load_one(profile)
+    if not w:
+        return await ctx.respond(
+            f"❌ Couldn't find **{profile}**. Use a profile URL, a username, or "
+            "a `0x…` address.",
+            ephemeral=True,
+        )
+    try:
+        msg = await ctx.channel.send(embed=trader_embed(w))
+        try:
+            await msg.pin()
+        except discord.DiscordException:
+            pass
+    except discord.Forbidden:
+        return await ctx.respond(
+            "❌ I can't post in this channel. Give my role **Send Messages** and "
+            "**Embed Links** here, then run the command again.",
+            ephemeral=True,
+        )
+
+    db.execute("INSERT OR REPLACE INTO traderboard VALUES(?,?,?,?,?)",
+               (ctx.channel.id, w.addr, w.name, msg.id, int(time.time())))
+    db.commit()
+
+    note = ""
+    if getattr(w, "is_market_maker", False):
+        note = ("\n\n🤖 Heads up: this one reads as a **market maker** — hundreds "
+                "of tiny fills, both sides held, no position above a few percent. "
+                "Their book is inventory, not conviction.")
+    await ctx.respond(
+        f"👤 Now following **{w.name}** in this channel.\n"
+        f"The board is **rewritten in place every {POLL_MINUTES} min** — no feed, "
+        "because a trader like this can fire hundreds of trades an hour.\n"
+        "Run `/trader-board` again with another profile to replace it, or "
+        "`/untrack-board` to stop.{}".format(note),
+        ephemeral=True,
+    )
+
+
+@bot.slash_command(
+    name="untrack-board", description="Stop the trader board in this channel",
+    guild_ids=GUILDS,
+)
+async def untrack_board(ctx):
+    await ctx.defer(ephemeral=True)
+    row = db.execute("SELECT label FROM traderboard WHERE channel_id=?",
+                     (ctx.channel.id,)).fetchone()
+    if not row:
+        return await ctx.respond("No trader board in this channel.", ephemeral=True)
+    db.execute("DELETE FROM traderboard WHERE channel_id=?", (ctx.channel.id,))
+    db.commit()
+    await ctx.respond(f"🔕 Stopped following **{row[0]}** here.", ephemeral=True)
 
 
 @bot.slash_command(
