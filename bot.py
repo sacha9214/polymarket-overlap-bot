@@ -676,7 +676,10 @@ async def track(ctx, profile: str):
     db.commit()
 
     pnl = u.get("pnl")
-    extra = f"\nAll-time P&L on the leaderboard: **{ov.fmt_usd(pnl)}**" if pnl else ""
+    # Le profil est résolu depuis le palmarès de la SEMAINE en premier : annoncer
+    # « all-time » serait faux dès que le trader y figure (RN1 : 136 K\u00a0$ sur la
+    # semaine, 12,8\u00a0M$ en cumulé).
+    extra = f"\nLeaderboard P&L: **{ov.fmt_usd(pnl)}**" if pnl else ""
     await ctx.respond(
         f"✅ Now tracking **{name}** (`{addr[:10]}…`).{extra}\n"
         f"They'll be analysed every cycle alongside the weekly top {PRESET_SIZE}, "
