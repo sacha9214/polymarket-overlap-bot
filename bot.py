@@ -23,6 +23,7 @@ ou dans la variable d'environnement DISCORD_BOT_TOKEN. Ne le partage jamais.
 
 from __future__ import annotations
 
+import aiohttp
 import asyncio
 import fcntl
 import json
@@ -128,6 +129,32 @@ db.execute("""CREATE TABLE IF NOT EXISTS guides(
 # n'y figurait pas) : sans épinglage, on le perd de vue.
 # Un salon dédié à UN trader : message unique réécrit en place. Un flux de ses
 # trades serait illisible — RN1 en fait 773 à l'heure, à 17 $ pièce.
+# Journal des alertes : table qu'on n'ECRASE JAMAIS, contrairement a `seen` qui
+# n'est qu'un antidoublon reecrit a chaque cycle. Sans elle, impossible de savoir
+# apres coup ce que le bot a annonce — et donc impossible de repondre a la seule
+# question qui vaille : le smart money suivi gagne-t-il vraiment ses paris ?
+#
+# verdict : NULL tant que le marche n'est pas resolu
+#           "win"  = l'issue sur laquelle le smart money etait a gagne
+#           "loss" = elle a perdu
+#           "void" = marche annule, ni gagnant ni perdant
+db.execute("""CREATE TABLE IF NOT EXISTS journal(
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  cid       TEXT,
+  outcome   TEXT,
+  title     TEXT,
+  kind      TEXT,
+  value     REAL,
+  price     REAL,
+  holders   INTEGER,
+  contested INTEGER,
+  days_left REAL,
+  ts        INTEGER,
+  verdict   TEXT,
+  scored    INTEGER)""")
+db.execute("CREATE INDEX IF NOT EXISTS idx_j_verdict ON journal(verdict, ts)")
+db.execute("""CREATE TABLE IF NOT EXISTS databoard(
+  channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
 db.execute("""CREATE TABLE IF NOT EXISTS traderboard(
   channel_id INTEGER PRIMARY KEY, addr TEXT, label TEXT,
   message_id INTEGER, updated INTEGER)""")
@@ -243,6 +270,212 @@ async def get_analysis(force: bool = False):
 # ---------------------------------------------------------------------------
 # Rendu
 # ---------------------------------------------------------------------------
+def log_alert(m: dict, kind: str) -> None:
+    """Consigne une alerte au moment ou elle part.
+
+    Le prix, la taille de la position et le nombre de detenteurs ne sont pas
+    reconstituables plus tard : le portefeuille d'un trader change en
+    permanence. C'est donc maintenant ou jamais.
+    """
+    try:
+        db.execute(
+            "INSERT INTO journal(cid,outcome,title,kind,value,price,holders,"
+            "contested,days_left,ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (m.get("conditionId"), m.get("outcome"), m.get("title"), kind,
+             m.get("totalValue") or 0, m.get("price"),
+             len(m.get("holders") or []), 1 if m.get("contested") else 0,
+             m.get("daysLeft"), int(time.time())),
+        )
+        db.commit()
+    except Exception as exc:                       # ne jamais bloquer une alerte
+        print("journal: insert failed —", exc)
+
+
+async def score_journal(limit: int = 80) -> int:
+    """Juge les paris consignes dont le marche s'est resolu.
+
+    On ne rejuge jamais un verdict deja rendu. Les marches ANNULES sont
+    marques a part : les compter comme des defaites gonflerait artificiellement
+    le taux d'echec du smart money.
+    """
+    rows = db.execute(
+        "SELECT DISTINCT cid FROM journal WHERE cid IS NOT NULL AND verdict IS NULL "
+        "ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+    if not rows:
+        return 0
+
+    import json as _json
+    sem = asyncio.Semaphore(6)
+    res: dict = {}
+
+    async def one(session, cid):
+        async with sem:
+            try:
+                async with session.get(
+                    f"https://gamma-api.polymarket.com/markets?condition_ids={cid}",
+                    timeout=30,
+                ) as r:
+                    if r.status != 200:
+                        return
+                    ms = await r.json()
+            except Exception:
+                return
+        for mk in ms or []:
+            if not mk.get("closed"):
+                return
+            try:
+                pr = _json.loads(mk.get("outcomePrices") or "[]")
+                oc = _json.loads(mk.get("outcomes") or "[]")
+            except Exception:
+                return
+            if len(pr) == 2 and len(oc) == 2:
+                if pr == ["0", "0"]:
+                    res[cid] = None                # annule
+                elif pr[0] == "1":
+                    res[cid] = oc[0]
+                elif pr[1] == "1":
+                    res[cid] = oc[1]
+            return
+
+    async with aiohttp.ClientSession() as session:
+        await asyncio.gather(*(one(session, r[0]) for r in rows))
+
+    now = int(time.time())
+    n = 0
+    for cid, winner in res.items():
+        for jid, outcome in db.execute(
+                "SELECT id, outcome FROM journal WHERE cid=? AND verdict IS NULL",
+                (cid,)).fetchall():
+            if winner is None:
+                v = "void"
+            else:
+                v = "win" if (outcome or "").strip().lower() == winner.strip().lower() else "loss"
+            db.execute("UPDATE journal SET verdict=?, scored=? WHERE id=?", (v, now, jid))
+            n += 1
+    db.commit()
+    return n
+
+
+def smart_money_record() -> dict:
+    """Le smart money a-t-il raison ? Decoupe par taille de position engagee."""
+    rows = db.execute(
+        "SELECT value, price, verdict, kind FROM journal WHERE value IS NOT NULL"
+    ).fetchall()
+    buckets = [("under $1k", 0, 1000), ("$1k–10k", 1000, 10000),
+               ("$10k–50k", 10000, 50000), ("over $50k", 50000, float("inf"))]
+    out = {"buckets": [], "total": dict(n=0, judged=0, wins=0, losses=0,
+                                        void=0, pending=0, staked=0.0)}
+    for label, lo, hi in buckets:
+        b = [r for r in rows if lo <= (r[0] or 0) < hi]
+        if not b:
+            continue
+        wins = sum(1 for r in b if r[2] == "win")
+        losses = sum(1 for r in b if r[2] == "loss")
+        void = sum(1 for r in b if r[2] == "void")
+        judged = wins + losses
+        prices = [r[1] for r in b if r[1]]
+        out["buckets"].append(dict(
+            label=label, n=len(b), judged=judged, wins=wins, losses=losses,
+            void=void, pending=len(b) - judged - void,
+            staked=sum(r[0] or 0 for r in b),
+            avg_price=(sum(prices) / len(prices)) if prices else 0.0,
+        ))
+        t = out["total"]
+        t["n"] += len(b); t["judged"] += judged; t["wins"] += wins
+        t["losses"] += losses; t["void"] += void
+        t["pending"] += len(b) - judged - void
+        t["staked"] += sum(r[0] or 0 for r in b)
+    return out
+
+
+def dataset_embed() -> discord.Embed:
+    """Le smart money suivi gagne-t-il vraiment ?
+
+    ATTENTION au piege central : un taux de reussite ne veut RIEN dire seul.
+    Acheter a 0.80 et gagner 80 % du temps, c'est etre exactement a l'equilibre.
+    Le prix paye est deja une prediction du taux de reussite — la seule question
+    utile est de savoir si le taux REEL depasse celui que le prix impliquait.
+    C'est cet ecart qui mesure un edge, pas le taux brut.
+    """
+    rec = smart_money_record()
+    t = rec["total"]
+    first = db.execute("SELECT MIN(ts) FROM journal").fetchone()[0]
+    days = ((time.time() - first) / 86400) if first else 0.0
+
+    e = discord.Embed(
+        title="📊 Smart money — does it actually win?",
+        description=(
+            f"**{t['n']:,}** entries logged over **{days:.1f} days**, "
+            f"**{ov.fmt_usd(t['staked'])}** of their money behind them.\n"
+            f"**{t['judged']:,}** have resolved."
+        ),
+        colour=GOLD,
+    )
+
+    if not rec["buckets"]:
+        e.add_field(
+            name="Nothing logged yet",
+            value="The journal starts on the next buy alert. From here on, every "
+                  "entry is written down and scored once its market settles.",
+            inline=False,
+        )
+        e.set_footer(text=f"Checked every {POLL_MINUTES} min")
+        return e
+
+    if t["judged"]:
+        rate = 100 * t["wins"] / t["judged"]
+        e.add_field(
+            name="Verdict",
+            value=f"**{t['wins']:,} won / {t['losses']:,} lost** — **{rate:.1f}%**",
+            inline=False,
+        )
+
+    lines = [f"`{'stake':<11}{'bets':>6}{'done':>6}{'won':>5}{'rate':>7}{'priced':>8}`"]
+    for b in rec["buckets"]:
+        r = f"{100*b['wins']/b['judged']:.0f}%" if b["judged"] else "—"
+        pr = f"{100*b['avg_price']:.0f}%" if b["avg_price"] else "—"
+        lines.append(
+            f"`{b['label']:<11}{b['n']:>6}{b['judged']:>6}{b['wins']:>5}{r:>7}{pr:>8}`"
+        )
+    e.add_field(name="By position size", value="\n".join(lines)[:1024], inline=False)
+
+    # L'ecart entre le taux reel et celui implique par le prix paye : le seul
+    # chiffre qui dise s'il y a un edge, plutot qu'un gout pour les favoris.
+    judged = [b for b in rec["buckets"] if b["judged"] >= 5 and b["avg_price"]]
+    if judged:
+        rows = []
+        for b in judged:
+            real = 100 * b["wins"] / b["judged"]
+            implied = 100 * b["avg_price"]
+            d = real - implied
+            rows.append(f"`{b['label']:<11}` {real:>5.0f}% vs {implied:>4.0f}% priced "
+                        f"→ **{d:+.0f} pts**")
+        e.add_field(
+            name="Edge — real rate vs what the price implied",
+            value="\n".join(rows)[:1024],
+            inline=False,
+        )
+
+    if t["void"]:
+        e.add_field(name="Voided markets", value=f"{t['void']} (excluded — neither won nor lost)", inline=True)
+    e.add_field(name="Still open", value=f"{t['pending']:,}", inline=True)
+
+    e.add_field(
+        name="How to read this",
+        value=(
+            "A win rate on its own is meaningless: buying at 80¢ and winning 80% "
+            "of the time is break-even. What matters is the **gap** between the "
+            "real rate and the rate the price already implied. Positive gap = "
+            "they beat the market. Around zero = they were simply paying for "
+            "favourites."
+        ),
+        inline=False,
+    )
+    e.set_footer(text=f"Rewritten every {POLL_MINUTES} min · entries only, exits aren't scored")
+    e.timestamp = discord.utils.utcnow()
+    return e
+
+
 def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
     cls, label, pts = ov.verdict(m)
     colour = {"buy": GREEN, "avoid": RED}.get(cls, GREY)
@@ -566,6 +799,44 @@ async def watcher():
         except discord.DiscordException as exc:
             print(f"watcher: trader board failed on {channel_id} — {exc}")
 
+    # Juger les paris consignes dont le marche s'est resolu. Isole : une panne
+    # du scoreur ne doit jamais empecher les alertes de partir.
+    try:
+        n = await score_journal()
+        if n:
+            print(f"journal: {n} pari(s) juge(s)")
+    except Exception as exc:
+        print("journal: scoring failed —", exc)
+
+    for (channel_id,) in db.execute("SELECT channel_id FROM databoard").fetchall():
+        ch = bot.get_channel(channel_id)
+        if ch is None:
+            continue
+        try:
+            row = db.execute("SELECT message_id FROM databoard WHERE channel_id=?",
+                             (channel_id,)).fetchone()
+            emb = dataset_embed()
+            msg = None
+            if row and row[0]:
+                try:
+                    msg = await ch.fetch_message(row[0])
+                    await msg.edit(embed=emb)
+                except discord.NotFound:
+                    msg = None
+            if msg is None:
+                msg = await ch.send(embed=emb)
+                try:
+                    await msg.pin()
+                except discord.DiscordException:
+                    pass
+                db.execute("UPDATE databoard SET message_id=? WHERE channel_id=?",
+                           (msg.id, channel_id))
+            db.execute("UPDATE databoard SET updated=? WHERE channel_id=?",
+                       (int(time.time()), channel_id))
+            db.commit()
+        except discord.DiscordException as exc:
+            print(f"watcher: dataset board failed on {channel_id} — {exc}")
+
     # Flux « buys » : uniquement les nouvelles entrées.
     for channel_id, min_value in db.execute(
             "SELECT channel_id, min_value FROM feeds WHERE kind='buys'").fetchall():
@@ -577,6 +848,7 @@ async def watcher():
         for m in picks[:5]:                      # jamais plus de 5 alertes par cycle
             try:
                 await ch.send(embed=market_embed(m, kind="new"))
+                log_alert(m, "buy")
             except Exception as exc:
                 print("watcher: send failed —", exc)
 
@@ -757,6 +1029,42 @@ async def marketmakers(ctx, mode: str):
                    "They stay visible via `/wallet`.",
     }[mode]
     await ctx.respond(f"{txt}\nTakes effect on the next cycle.", ephemeral=True)
+
+
+@bot.slash_command(
+    name="dataset",
+    description="Does the smart money we track actually win?",
+    guild_ids=GUILDS,
+)
+async def dataset(ctx):
+    await ctx.defer(ephemeral=True)
+    await ctx.respond(embed=dataset_embed(), ephemeral=True)
+
+
+@bot.slash_command(
+    name="dataset-board",
+    description="Install the live smart-money track record in this channel",
+    guild_ids=GUILDS,
+)
+async def dataset_board(ctx):
+    await ctx.defer(ephemeral=True)
+    try:
+        msg = await ctx.channel.send(embed=dataset_embed())
+        try:
+            await msg.pin()
+        except discord.DiscordException:
+            pass
+    except discord.Forbidden:
+        return await ctx.respond(
+            "❌ I can't post in this channel. Give my role **Send Messages** and "
+            "**Embed Links** here, then run the command again.", ephemeral=True)
+    db.execute("INSERT OR REPLACE INTO databoard VALUES(?,?,?)",
+               (ctx.channel.id, msg.id, int(time.time())))
+    db.commit()
+    await ctx.respond(
+        f"📊 Track record installed and pinned, rewritten every {POLL_MINUTES} min.\n"
+        "Every buy alert is logged and scored once its market settles — wins "
+        "**and** losses.", ephemeral=True)
 
 
 @bot.slash_command(
