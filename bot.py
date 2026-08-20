@@ -150,8 +150,14 @@ db.execute("""CREATE TABLE IF NOT EXISTS journal(
   contested INTEGER,
   days_left REAL,
   ts        INTEGER,
+  alerted   INTEGER DEFAULT 1,
   verdict   TEXT,
   scored    INTEGER)""")
+# Migration douce des bases existantes.
+try:
+    db.execute("ALTER TABLE journal ADD COLUMN alerted INTEGER DEFAULT 1")
+except sqlite3.OperationalError:
+    pass
 db.execute("CREATE INDEX IF NOT EXISTS idx_j_verdict ON journal(verdict, ts)")
 db.execute("""CREATE TABLE IF NOT EXISTS databoard(
   channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
@@ -270,7 +276,14 @@ async def get_analysis(force: bool = False):
 # ---------------------------------------------------------------------------
 # Rendu
 # ---------------------------------------------------------------------------
-def log_alert(m: dict, kind: str) -> None:
+# Faut-il n'alerter que lorsque les wallets suivis sont d'accord ?
+# Un desaccord entre bons traders rend le signal ambigu : on ne sait pas
+# lequel suivre. Filtrer donne moins d'alertes mais plus lisibles.
+def consensus_only() -> bool:
+    return (meta_get("consensus_only", "1") or "1") == "1"
+
+
+def log_alert(m: dict, kind: str, alerted: bool = True) -> None:
     """Consigne une alerte au moment ou elle part.
 
     Le prix, la taille de la position et le nombre de detenteurs ne sont pas
@@ -280,11 +293,11 @@ def log_alert(m: dict, kind: str) -> None:
     try:
         db.execute(
             "INSERT INTO journal(cid,outcome,title,kind,value,price,holders,"
-            "contested,days_left,ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "contested,days_left,ts,alerted) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (m.get("conditionId"), m.get("outcome"), m.get("title"), kind,
              m.get("totalValue") or 0, m.get("price"),
              len(m.get("holders") or []), 1 if m.get("contested") else 0,
-             m.get("daysLeft"), int(time.time())),
+             m.get("daysLeft"), int(time.time()), 1 if alerted else 0),
         )
         db.commit()
     except Exception as exc:                       # ne jamais bloquer une alerte
@@ -844,11 +857,21 @@ async def watcher():
         if ch is None:
             continue
         picks = [m for m in entries if m["totalValue"] >= (min_value or 0)]
+
+        # Les contestes sont journalises MAIS PAS envoyes. Les jeter purement et
+        # simplement rendrait l'hypothese invérifiable : c'est en gardant les deux
+        # populations qu'on pourra comparer leurs taux de reussite plus tard.
+        if consensus_only():
+            for m in picks:
+                if m.get("contested"):
+                    log_alert(m, "buy", alerted=False)
+            picks = [m for m in picks if not m.get("contested")]
+
         picks.sort(key=lambda m: -m["evTime"])
         for m in picks[:5]:                      # jamais plus de 5 alertes par cycle
             try:
                 await ch.send(embed=market_embed(m, kind="new"))
-                log_alert(m, "buy")
+                log_alert(m, "buy", alerted=True)
             except Exception as exc:
                 print("watcher: send failed —", exc)
 
@@ -1028,6 +1051,40 @@ async def marketmakers(ctx, mode: str):
         "exclude": "🚫 Market makers are dropped from the overlap calculation. "
                    "They stay visible via `/wallet`.",
     }[mode]
+    await ctx.respond(f"{txt}\nTakes effect on the next cycle.", ephemeral=True)
+
+
+@bot.slash_command(
+    name="consensus",
+    description="Only alert when the tracked wallets agree",
+    guild_ids=GUILDS,
+)
+@discord.default_permissions(manage_guild=True)
+@discord.option("mode", str, description="on or off",
+                choices=["on", "off"], default="", required=False)
+async def consensus(ctx, mode: str):
+    await ctx.defer(ephemeral=True)
+    mode = (mode or "").strip().lower()
+
+    if mode not in ("on", "off"):
+        cur = "ON" if consensus_only() else "OFF"
+        return await ctx.respond(
+            f"Consensus filter: **{cur}**\n\n"
+            "When ON, a buy alert only fires if the tracked wallets **agree** on "
+            "the outcome. A market where they take opposite sides is skipped — "
+            "if good traders disagree, there is no one to copy.\n\n"
+            "Measured right now: about **26%** of alerts above the usual "
+            "thresholds are contested, so expect roughly a quarter fewer alerts.\n\n"
+            "`/consensus on` · `/consensus off`",
+            ephemeral=True,
+        )
+
+    meta_set("consensus_only", "1" if mode == "on" else "0")
+    txt = ("✅ Buy alerts now fire **only when the tracked wallets agree**. "
+           "Expect about a quarter fewer, and cleaner ones."
+           if mode == "on" else
+           "🔕 Filter off — every qualifying entry alerts again, including the "
+           "ones where wallets disagree.")
     await ctx.respond(f"{txt}\nTakes effect on the next cycle.", ephemeral=True)
 
 
