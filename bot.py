@@ -324,8 +324,16 @@ async def score_journal(limit: int = 80) -> int:
     async def one(session, cid):
         async with sem:
             try:
+                # ⚠️ `closed=true` est OBLIGATOIRE. Sans lui, Gamma EXCLUT
+                # silencieusement les marchés clos du filtre `condition_ids` :
+                # elle répond 200 avec une liste VIDE, exactement pour les
+                # marchés qu'on cherche à juger. Resultat : tout restait
+                # eternellement "non juge" sans la moindre erreur.
+                # Corollaire utile : une reponse vide signifie ici "pas encore
+                # resolu", ce qui est precisement le cas a laisser en attente.
                 async with session.get(
-                    f"https://gamma-api.polymarket.com/markets?condition_ids={cid}",
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"condition_ids": cid, "closed": "true"},
                     timeout=30,
                 ) as r:
                     if r.status != 200:
