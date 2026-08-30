@@ -420,21 +420,7 @@ def style_summary(w: Wallet) -> dict:
     prices = sorted((p.get("avgPrice") or 0) for p in pos if p.get("avgPrice"))
     themes: dict = {}
     for p in pos:
-        t = (p.get("title") or "").lower() + " " + (p.get("eventSlug") or "").lower()
-        k = "other"
-        for name, words in (
-            ("sport", ("vs.", "vs-", "nba", "nfl", "soccer", "football", "tennis",
-                       "ufc", "mlb", "match", "cup", "league")),
-            ("crypto", ("bitcoin", "ethereum", "btc", "eth", "solana", "crypto")),
-            ("politics", ("election", "president", "senate", "trump", "governor",
-                          "primary", "congress")),
-            ("world", ("ukraine", "russia", "israel", "gaza", "china", "nato",
-                       "war", "ceasefire", "iran")),
-            ("macro", ("fed", "inflation", "gdp", "rate", "recession", "cpi")),
-        ):
-            if any(x in t for x in words):
-                k = name
-                break
+        k = theme_of(p.get("title"), p.get("eventSlug"))
         themes[k] = themes.get(k, 0) + (p.get("initialValue") or 0)
     return {
         "n": len(pos),
@@ -443,6 +429,53 @@ def style_summary(w: Wallet) -> dict:
         "median_entry": prices[len(prices) // 2] if prices else 0.0,
         "themes": sorted(themes.items(), key=lambda x: -x[1])[:3],
     }
+
+
+# Secteurs. Un wallet peut etre excellent sur le foot et desastreux sur la
+# geopolitique : une note globale melangerait les deux et masquerait les deux.
+THEMES = (
+    # Les slugs de ligue (mls-, epl-, nba-…) sont le signal le plus fiable :
+    # un titre peut etre ambigu, un slug de match ne l'est jamais.
+    ("sport", (" vs ", "vs.", "vs-", "nba", "nfl", "soccer", "football", "tennis",
+               "ufc", "mlb", "nhl", "match", "cup", "league", "premier", "liga",
+               "serie a", "bundesliga", "ligue 1", "o/u", "esports", "cs2",
+               "dota", "lol:", "mls-", "epl-", "bl1-", "bl2-", "el1-", "clf-",
+               "kbo:", "npb", "atp", "wta", "f1", "golf", "masters", "open")),
+    ("crypto", ("bitcoin", "ethereum", "btc", "eth", "solana", "crypto", "xrp",
+                "dogecoin", "token")),
+    ("politics", ("election", "president", "senate", "trump", "governor",
+                  "primary", "congress", "parliament", "vote", "poll", "cabinet")),
+    ("world", ("ukraine", "russia", "israel", "gaza", "china", "nato", "war",
+               "ceasefire", "iran", "hamas", "strike", "invade")),
+    ("macro", ("fed", "inflation", "gdp", "rate", "recession", "cpi", "unemployment")),
+    ("weather", ("temperature", "hurricane", "rain", "snow", "storm", "weather")),
+    ("culture", ("netflix", "oscar", "grammy", "box office", "movie", "album",
+                 "spotify", "rotten tomatoes")),
+)
+
+
+# Motifs propres aux paris sportifs, que les mots-cles seuls ratent :
+# « Will Tottenham win on 2026-08-22? », « Spread: Indiana Fever (-3.5) ».
+# Mesure sur 3 547 titres reels : ils representaient a eux seuls la moitie
+# des marches classes "other" a tort.
+_SPORT_PATTERNS = re.compile(
+    r"win on \d{4}-\d{2}-\d{2}"          # « win on 2026-08-20 »
+    r"|^spread:"                            # « Spread: LV (-1.5) »
+    r"|\bfc\b|\bsc\b|\bcf\b|\bac\b"  # clubs
+    r"|ballon d'or|world cup|champions",
+    re.I,
+)
+
+
+def theme_of(title: str, event_slug: str = "") -> str:
+    """Secteur d'un marche, devine depuis son titre et son slug."""
+    t = f"{title or ''} {event_slug or ''}".lower()
+    for name, words in THEMES:
+        if any(w in t for w in words):
+            return name
+    if _SPORT_PATTERNS.search(t):
+        return "sport"
+    return "other"
 
 
 def detect_twins(ws: list[Wallet]) -> None:

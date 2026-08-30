@@ -151,13 +151,17 @@ db.execute("""CREATE TABLE IF NOT EXISTS journal(
   days_left REAL,
   ts        INTEGER,
   alerted   INTEGER DEFAULT 1,
+  wallets   TEXT,
+  theme     TEXT,
   verdict   TEXT,
   scored    INTEGER)""")
 # Migration douce des bases existantes.
-try:
-    db.execute("ALTER TABLE journal ADD COLUMN alerted INTEGER DEFAULT 1")
-except sqlite3.OperationalError:
-    pass
+for _col, _type in (("alerted", "INTEGER DEFAULT 1"), ("wallets", "TEXT"),
+                    ("theme", "TEXT")):
+    try:
+        db.execute(f"ALTER TABLE journal ADD COLUMN {_col} {_type}")
+    except sqlite3.OperationalError:
+        pass
 db.execute("CREATE INDEX IF NOT EXISTS idx_j_verdict ON journal(verdict, ts)")
 db.execute("""CREATE TABLE IF NOT EXISTS databoard(
   channel_id INTEGER PRIMARY KEY, message_id INTEGER, updated INTEGER)""")
@@ -293,11 +297,18 @@ def log_alert(m: dict, kind: str, alerted: bool = True) -> None:
     try:
         db.execute(
             "INSERT INTO journal(cid,outcome,title,kind,value,price,holders,"
-            "contested,days_left,ts,alerted) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "contested,days_left,ts,alerted,wallets,theme) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (m.get("conditionId"), m.get("outcome"), m.get("title"), kind,
              m.get("totalValue") or 0, m.get("price"),
              len(m.get("holders") or []), 1 if m.get("contested") else 0,
-             m.get("daysLeft"), int(time.time()), 1 if alerted else 0),
+             m.get("daysLeft"), int(time.time()), 1 if alerted else 0,
+             # Les adresses, pas seulement leur nombre : sans elles impossible
+             # d'attribuer une reussite a un wallet precis, et donc de mesurer
+             # qui a vraiment un edge.
+             ",".join((h["wallet"].addr or "").lower()
+                      for h in (m.get("holders") or [])),
+             ov.theme_of(m.get("title"), m.get("eventSlug"))),
         )
         db.commit()
     except Exception as exc:                       # ne jamais bloquer une alerte
