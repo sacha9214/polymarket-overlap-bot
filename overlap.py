@@ -456,17 +456,25 @@ THEMES = (
                "ufc", "mlb", "nhl", "match", "cup", "league", "premier", "liga",
                "serie a", "bundesliga", "ligue 1", "o/u", "esports", "cs2",
                "dota", "lol:", "mls-", "epl-", "bl1-", "bl2-", "el1-", "clf-",
-               "kbo:", "npb", "atp", "wta", "f1", "golf", "masters", "open")),
+               # ⚠️ « open » seul attrapait « opening weekend » (box-office) : on nomme
+               # les tournois explicitement.
+               "kbo:", "npb", "atp", "wta", "f1", "golf", "masters",
+               "us open", "french open", "australian open", "the open")),
     ("crypto", ("bitcoin", "ethereum", "btc", "eth", "solana", "crypto", "xrp",
                 "dogecoin", "token")),
     ("politics", ("election", "president", "senate", "trump", "governor",
                   "primary", "congress", "parliament", "vote", "poll", "cabinet")),
-    ("world", ("ukraine", "russia", "israel", "gaza", "china", "nato", "war",
-               "ceasefire", "iran", "hamas", "strike", "invade")),
+    # ⚠️ « strike » et « war » sont retires : en sous-chaine ils attrapaient
+    # n importe quoi. Mesure : « the-odyssey-total-domestic-gross-…-higher-
+    # STRIKES » — un film au box-office classe en geopolitique. Ces deux mots
+    # passent par _WORD_PATTERNS, en mots entiers.
+    ("world", ("ukraine", "russia", "israel", "gaza", "nato", "ceasefire",
+               "iran", "hamas", "invade", "airstrike", "annex")),
     ("macro", ("fed", "inflation", "gdp", "rate", "recession", "cpi", "unemployment")),
     ("weather", ("temperature", "hurricane", "rain", "snow", "storm", "weather")),
     ("culture", ("netflix", "oscar", "grammy", "box office", "movie", "album",
-                 "spotify", "rotten tomatoes")),
+                 "spotify", "rotten tomatoes", "domestic gross", "worldwide gross",
+                 "opening weekend")),
 )
 
 
@@ -474,6 +482,13 @@ THEMES = (
 # « Will Tottenham win on 2026-08-22? », « Spread: Indiana Fever (-3.5) ».
 # Mesure sur 3 547 titres reels : ils representaient a eux seuls la moitie
 # des marches classes "other" a tort.
+# Termes trop courants pour etre cherches en sous-chaine : il leur faut des
+# frontieres de mot, sinon « strikes » ou « warm » declenchent la geopolitique.
+_WORD_PATTERNS = (
+    ("world", re.compile(r"\b(war|strike|troops|missile|border)\b", re.I)),
+    ("crypto", re.compile(r"\b(btc|eth|sol)\b", re.I)),
+)
+
 _SPORT_PATTERNS = re.compile(
     r"win on \d{4}-\d{2}-\d{2}"          # « win on 2026-08-20 »
     r"|^spread:"                            # « Spread: LV (-1.5) »
@@ -491,6 +506,9 @@ def theme_of(title: str, event_slug: str = "") -> str:
             return name
     if _SPORT_PATTERNS.search(t):
         return "sport"
+    for name, pat in _WORD_PATTERNS:
+        if pat.search(t):
+            return name
     return "other"
 
 
