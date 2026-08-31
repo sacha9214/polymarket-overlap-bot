@@ -580,6 +580,20 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
                 f"📊 {w.record_str()}")
         return "\n".join(rows)[:1000] or "—"
 
+    # Dire POURQUOI le signal est fort, plutot que de le colorier : combien de
+    # ces wallets jouent vraiment ce secteur, et si l overlap y est inhabituel.
+    theme = m.get("theme")
+    if theme:
+        specialists = sum(1 for h in m["holders"]
+                          if h["wallet"].exposure(theme) >= ov.SECTOR_FULL)
+        bits = [f"**{theme}**", f"{specialists}/{len(m['holders'])} specialists"]
+        surp = m.get("surprise") or 1.0
+        if surp >= 1.5:
+            bits.append(f"overlap **{surp:.1f}× rarer than usual here**")
+        elif surp <= 0.8:
+            bits.append(f"overlap common in this sector ({surp:.1f}×)")
+        e.add_field(name="Sector fit", value=" · ".join(bits), inline=False)
+
     e.add_field(name=f"✅ For \u201c{label_out}\u201d — {ov.fmt_usd(m['totalValue'])}",
                 value=who(m["holders"]), inline=False)
     if m.get("contested"):
@@ -1071,6 +1085,42 @@ async def marketmakers(ctx, mode: str):
                    "They stay visible via `/wallet`.",
     }[mode]
     await ctx.respond(f"{txt}\nTakes effect on the next cycle.", ephemeral=True)
+
+
+@bot.slash_command(
+    name="sectors",
+    description="Weight wallets by the sector they actually play",
+    guild_ids=GUILDS,
+)
+@discord.default_permissions(manage_guild=True)
+@discord.option("mode", str, description="on or off",
+                choices=["on", "off"], default="", required=False)
+async def sectors(ctx, mode: str):
+    await ctx.defer(ephemeral=True)
+    mode = (mode or "").strip().lower()
+    if mode not in ("on", "off"):
+        cur = "ON" if (meta_get("sector_adjust", "1") or "1") == "1" else "OFF"
+        return await ctx.respond(
+            f"Sector weighting: **{cur}**\n\n"
+            "**35 of the 46 tracked wallets put over 80% of their capital in a "
+            "single sector**, most of them 100%. A macro specialist showing up "
+            "in a football market is not expressing skill — they simply don't "
+            "play there.\n\n"
+            "When ON, two corrections apply:\n"
+            "• a wallet's weight drops to 25% outside the sector it actually plays\n"
+            "• an overlap is compared to that sector's **normal** rate — three "
+            "wallets on a geopolitics market is far rarer than three on a Fed "
+            "decision, where they all pile in anyway\n\n"
+            "`/sectors on` · `/sectors off`",
+            ephemeral=True,
+        )
+    meta_set("sector_adjust", "1" if mode == "on" else "0")
+    await ctx.respond(
+        ("✅ Wallets are now weighted by the sector they actually play."
+         if mode == "on" else
+         "🔕 Off — every wallet counts the same everywhere, as before."),
+        ephemeral=True,
+    )
 
 
 @bot.slash_command(

@@ -264,6 +264,14 @@ class Wallet:
     group: int = -1
     mm_score: int = 0          # 0 à 4 — voir market_maker_score()
     mm_reasons: list = field(default_factory=list)
+    # Part de son capital par secteur. Mesure : 35 wallets sur 46 sont
+    # mono-secteur a plus de 80 %, souvent a 100 %. Un specialiste macro qui
+    # apparait dans un match de foot n y exprime aucune competence.
+    sectors: dict = field(default_factory=dict)
+
+    def exposure(self, theme: str) -> float:
+        """Part du capital de ce wallet engagee dans ce secteur, dans [0,1]."""
+        return self.sectors.get(theme, 0.0)
 
     @property
     def is_market_maker(self) -> bool:
@@ -321,12 +329,20 @@ async def load_wallet(c: Client, addr: str, lb: dict | None) -> Wallet:
     mm_score, mm_reasons = market_maker_score(
         positions, activity if isinstance(activity, list) else None
     )
+    by_sector: dict = {}
+    for p in positions or []:
+        by_sector[theme_of(p.get("title"), p.get("eventSlug"))] = (
+            by_sector.get(theme_of(p.get("title"), p.get("eventSlug")), 0.0)
+            + (p.get("initialValue") or 0)
+        )
+    tot_sec = sum(by_sector.values()) or 1.0
+    sectors = {k: v / tot_sec for k, v in by_sector.items()}
     return Wallet(
         addr=addr, name=name, positions=positions,
         portfolio=sum(p.get("currentValue") or 0 for p in positions),
         open_pnl=sum(p.get("cashPnl") or 0 for p in positions),
         tr=tr, lb=lb, quality=wallet_quality(tr, lb),
-        mm_score=mm_score, mm_reasons=mm_reasons,
+        mm_score=mm_score, mm_reasons=mm_reasons, sectors=sectors,
     )
 
 
@@ -478,6 +494,42 @@ def theme_of(title: str, event_slug: str = "") -> str:
     return "other"
 
 
+# Un overlap ne vaut pas la meme chose partout. Mesure sur les portefeuilles
+# reels : 34 wallets jouent au sport et 20,1 % des marches sportifs ont un
+# overlap ; en macro ils ne sont que 13 mais 25,4 % des marches en ont un —
+# ils se tassent tous sur la meme decision de la Fed. Comparer a un absolu
+# serait donc faux : on compare a la moyenne DU SECTEUR.
+def sector_baselines(ws: list["Wallet"]) -> dict:
+    """Nombre moyen de wallets suivis par marche, secteur par secteur."""
+    counts: dict = {}
+    for w in ws:
+        for p in w.positions or []:
+            if (p.get("currentValue") or 0) < 1:
+                continue
+            th = theme_of(p.get("title"), p.get("eventSlug"))
+            key = f"{p.get('conditionId')}|{p.get('outcome')}"
+            counts.setdefault(th, {}).setdefault(key, set()).add(w.group)
+    out = {}
+    for th, markets in counts.items():
+        if len(markets) >= 5:          # sous 5 marches, la moyenne ne veut rien dire
+            out[th] = sum(len(v) for v in markets.values()) / len(markets)
+    return out
+
+
+def surprise_factor(n_groups: int, theme: str | None, baselines: dict) -> float:
+    """A quel point cet overlap depasse la normale de son secteur.
+
+    Borne entre 0.6 et 2.0 : cela module le classement sans jamais l ecraser,
+    et un secteur mal echantillonne ne peut pas produire un facteur delirant.
+    """
+    if not SECTOR_ADJUST:
+        return 1.0
+    base = baselines.get(theme or "")
+    if not base or base <= 0:
+        return 1.0
+    return clamp(n_groups / base, 0.6, 2.0)
+
+
 def detect_twins(ws: list[Wallet]) -> None:
     """Deux portefeuilles quasi identiques = probablement la même personne : une seule voix."""
     sets = [{f"{p.get('conditionId')}|{p.get('outcome')}" for p in w.positions} for w in ws]
@@ -496,7 +548,27 @@ def detect_twins(ws: list[Wallet]) -> None:
 # ---------------------------------------------------------------------------
 # Modèle
 # ---------------------------------------------------------------------------
-def side_signal(holders: list[dict], price: float | None):
+# Un specialiste totalement absent d un secteur ne doit pas y peser, mais on ne
+# l annule pas non plus : sa presence exceptionnelle hors de son terrain reste
+# une information. Plancher a 0.25.
+SECTOR_FLOOR = 0.25
+# Au-dela, une exposition de 40 % au secteur vaut deja pleine confiance : exiger
+# 100 % ecraserait les rares wallets reellement polyvalents.
+SECTOR_FULL = 0.40
+# Interrupteur : a False, aucune des deux corrections sectorielles ne
+# s applique et le comportement revient exactement a celui d avant.
+SECTOR_ADJUST = True
+
+
+def sector_weight(w: "Wallet", theme: str | None) -> float:
+    """Poids d un wallet sur un secteur donne, dans [SECTOR_FLOOR, 1]."""
+    if not theme or not SECTOR_ADJUST:
+        return 1.0
+    e = w.exposure(theme)
+    return SECTOR_FLOOR + (1 - SECTOR_FLOOR) * min(1.0, e / SECTOR_FULL)
+
+
+def side_signal(holders: list[dict], price: float | None, theme: str | None = None):
     per_group: dict = {}
     for h in holders:
         g = h["wallet"].group
@@ -509,7 +581,8 @@ def side_signal(holders: list[dict], price: float | None):
                       else min(1, math.sqrt(max(0, h["value"])) / 100))
         timing = (clamp((price - h["avg"]) / 0.3, -0.5, 0.5) + 1
                   if price is not None and h["avg"] > 0 else 1)
-        s += w.quality * conviction * timing / per_group[w.group]
+        s += (w.quality * conviction * timing * sector_weight(w, theme)
+              / per_group[w.group])
     return s, any(n > 1 for n in per_group.values())
 
 
@@ -519,7 +592,8 @@ def compute_my_proba(m: dict):
     vers zéro à mesure que l'argent suivi se répartit des deux côtés.
     L'ajustement est plafonné par l'incertitude du marché (12 pts à 50¢, ~3 pts à 7¢).
     """
-    pro_s, has_twins = side_signal(m["holders"], m.get("price"))
+    theme = theme_of(m.get("title"), m.get("eventSlug"))
+    pro_s, has_twins = side_signal(m["holders"], m.get("price"), theme)
     my_val = sum(h["value"] for h in m["holders"])
     opp_val = sum(o["value"] for o in m.get("others", []))
     agreement = my_val / (my_val + opp_val) if (my_val + opp_val) > 0 else 1
@@ -563,7 +637,7 @@ def compute_overlaps(ws: list[Wallet]) -> list[dict]:
     return [m for m in markets.values() if len(m["holders"]) >= 2]
 
 
-def metrics(m: dict) -> dict:
+def metrics(m: dict, baselines: dict | None = None) -> dict:
     hs = m["holders"]
     total_value = sum(h["value"] for h in hs)
     total_shares = sum(h["shares"] for h in hs)
@@ -577,7 +651,12 @@ def metrics(m: dict) -> dict:
           if price and 0.01 < price < 0.99 else -1)
     d = days_left(m.get("endDate"))
     m["ev"] = ev
-    m["evTime"] = ev / max(0.5, (d if d and d > 0 else 90) / 30)
+    # La surprise module le CLASSEMENT, pas la probabilite : elle dit qu un
+    # overlap est inhabituel pour ce secteur, pas que l issue est plus probable.
+    m["theme"] = theme_of(m.get("title"), m.get("eventSlug"))
+    groups = len({h["wallet"].group for h in hs})
+    m["surprise"] = surprise_factor(groups, m["theme"], baselines or {})
+    m["evTime"] = ev / max(0.5, (d if d and d > 0 else 90) / 30) * m["surprise"]
     m["daysLeft"] = d
     # Un désaccord signalé dès 1 $ en face se déclenchait presque toujours et ne voulait
     # plus rien dire. On exige que le camp adverse pèse vraiment : au moins 10 % de
@@ -635,7 +714,8 @@ async def analyze(addresses: list[str], lb_by_addr: dict | None = None,
     # `ws` pour rester consultables via /wallet : on les écarte du signal, on ne
     # les efface pas.
     pool = [w for w in ws if not w.is_market_maker] if exclude_mm else ws
-    markets = [metrics(m) for m in compute_overlaps(pool)]
+    baselines = sector_baselines(pool)
+    markets = [metrics(m, baselines) for m in compute_overlaps(pool)]
     markets.sort(key=lambda m: (m["evTime"], m["totalValue"]), reverse=True)
     return ws, markets
 
