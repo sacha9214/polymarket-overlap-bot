@@ -77,6 +77,18 @@ PRESET_SIZE = int(os.environ.get("PRESET_SIZE", "50"))   # top 50 de la semaine
 DEFAULT_MIN_VALUE = 10_000     # n'alerte pas pour des miettes
 
 GREEN, RED, GREY, GOLD = 0x22C55E, 0xEF4444, 0x8B93A1, 0xEAB308
+# Rouge vif pour l affluence sectorielle. Volontairement DIFFERENT du RED
+# « avoid » : dans ce bot le rouge signifie deja « eviter », donc un signal
+# fort en rouge identique serait illisible. Le secteur est aussi ecrit dans
+# le titre — l information ne repose jamais sur la couleur seule.
+CROWD = 0xDC2626
+
+# Une affluence = plusieurs SPECIALISTES du secteur reunis sur le meme pari,
+# ET un overlap plus rare que la normale de ce secteur. Les deux conditions :
+# deux specialistes sur un marche de la Fed, ou tout le monde se tasse, ne
+# vaut pas deux specialistes sur un marche geopolitique.
+CROWD_MIN_SPECIALISTS = 2
+CROWD_MIN_SURPRISE = 1.3
 
 # Droits demandés à l'invitation. /setup a besoin de créer des salons (16) et
 # d'épingler (8192) ; le reste sert à lire, écrire et modifier ses propres messages.
@@ -508,13 +520,29 @@ def dataset_embed() -> discord.Embed:
     return e
 
 
+def sector_crowd(m: dict) -> tuple[int, float, bool]:
+    """Combien de specialistes du secteur, et l overlap est-il inhabituel ?"""
+    theme = m.get("theme")
+    if not theme:
+        return 0, 1.0, False
+    n = sum(1 for h in m.get("holders", [])
+            if h["wallet"].exposure(theme) >= ov.SECTOR_FULL)
+    surprise = m.get("surprise") or 1.0
+    return n, surprise, (n >= CROWD_MIN_SPECIALISTS and surprise >= CROWD_MIN_SURPRISE)
+
+
 def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
     cls, label, pts = ov.verdict(m)
     colour = {"buy": GREEN, "avoid": RED}.get(cls, GREY)
     if kind == "new":
         colour = GOLD
 
+    n_spec, surprise, crowded = sector_crowd(m)
+    theme = m.get("theme") or ""
     prefix = {"new": "🆕 Smart money just entered", "pick": "🎯"}.get(kind, "")
+    if crowded:
+        colour = CROWD
+        prefix = f"🔴 {n_spec} {theme.upper()} specialists piled in"
     label_out = ov.outcome_label(m["title"], m["outcome"])
 
     # Même lecture que les cartes du site : le pari et sa traduction, puis le contexte.
@@ -582,17 +610,18 @@ def market_embed(m: dict, kind: str = "pick") -> discord.Embed:
 
     # Dire POURQUOI le signal est fort, plutot que de le colorier : combien de
     # ces wallets jouent vraiment ce secteur, et si l overlap y est inhabituel.
-    theme = m.get("theme")
     if theme:
-        specialists = sum(1 for h in m["holders"]
-                          if h["wallet"].exposure(theme) >= ov.SECTOR_FULL)
-        bits = [f"**{theme}**", f"{specialists}/{len(m['holders'])} specialists"]
-        surp = m.get("surprise") or 1.0
-        if surp >= 1.5:
-            bits.append(f"overlap **{surp:.1f}× rarer than usual here**")
-        elif surp <= 0.8:
-            bits.append(f"overlap common in this sector ({surp:.1f}×)")
-        e.add_field(name="Sector fit", value=" · ".join(bits), inline=False)
+        bits = [f"**{theme}**", f"{n_spec}/{len(m['holders'])} specialists"]
+        if surprise >= 1.5:
+            bits.append(f"overlap **{surprise:.1f}× rarer than usual here**")
+        elif surprise <= 0.8:
+            bits.append(f"overlap common in this sector ({surprise:.1f}×)")
+        value = " · ".join(bits)
+        if crowded:
+            value += (f"\n🔴 **Crowded in {theme}** — {n_spec} traders who actually "
+                      f"specialise in this sector landed on the same bet, and that "
+                      f"is {surprise:.1f}× rarer than normal here.")
+        e.add_field(name="Sector fit", value=value[:1024], inline=False)
 
     e.add_field(name=f"✅ For \u201c{label_out}\u201d — {ov.fmt_usd(m['totalValue'])}",
                 value=who(m["holders"]), inline=False)
