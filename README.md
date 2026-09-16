@@ -76,3 +76,7 @@ Aucun *privileged intent* n'est nécessaire : le bot ne lit pas les messages.
   dans le terminal.
 
 Pas un conseil financier. Ne mise que ce que tu peux perdre.
+
+## Licence
+
+[MIT](LICENSE)
