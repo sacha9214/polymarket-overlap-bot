@@ -1,82 +1,94 @@
-# Polymarket Overlap — bot Discord
+# Polymarket Overlap — Discord Bot
 
-Le [site](https://sacha9214.github.io/polymarket-overlap/) ne peut rien faire tant que tu ne l'ouvres pas.
-Ce bot, lui, **te prévient** : il surveille les positions des meilleurs traders Polymarket et poste
-dans un salon quand le smart money **entre** sur un marché ou en **sort**.
+The [website](https://sacha9214.github.io/polymarket-overlap/) can't do anything until you open it.
+This bot **tells you**: it watches the positions of the best Polymarket traders and posts
+in a channel when the smart money **enters** a market or **exits** one.
 
-Le modèle (proba estimée, palmarès réel, désaccords, conviction) est le même que celui du site,
-porté à l'identique dans `overlap.py`.
+The model (estimated probability, real track record, disagreements, conviction) is the same as the
+website's, ported one-to-one in `overlap.py`.
 
-## Commandes
+## Commands
 
-| Commande | Effet |
+| Command | Effect |
 |---|---|
-| `/best [nombre]` | Les meilleures entrées du moment (1 à 5) |
-| `/wallet <adresse>` | Positions, palmarès réel et gains non réclamés d'une adresse |
-| `/watch [seuil]` | Abonne le salon aux alertes (défaut : à partir de 10 000 $) |
-| `/unwatch` | Coupe les alertes du salon |
-| `/status` | État de la surveillance |
+| `/setup` | Creates the full channel structure and wires everything up |
+| `/best [count]` | The best entries right now (1 to 5) |
+| `/wallet <address>` | Bets, real track record and unclaimed winnings of an address |
+| `/watch-buys [threshold]` | Sends BUY alerts to this channel: tracked traders opening a position (default: above $10,000) |
+| `/watch-exits [threshold]` | Sends EXIT alerts to this channel: positions they closed |
+| `/unwatch` | Unsubscribes this channel |
+| `/board` | Installs a live board of the best overlaps, rewritten in place every cycle |
+| `/guide` | Posts the how-to-read guide for this channel (pin it) |
+| `/track <profile>` · `/untrack` · `/tracked` | Always follow a trader, even outside the weekly top 50 |
+| `/trader-board <profile>` · `/untrack-board` | Follows one trader in this channel with a live board |
+| `/dataset` · `/dataset-board` | Does the smart money we track actually win? Live track record |
+| `/consensus` | Only alert when the tracked wallets agree |
+| `/sectors` | Weights wallets by the sector they actually play |
+| `/marketmakers` | How to handle market makers in the analysis (off, flag or exclude) |
+| `/status` | Monitoring status |
 
-`/watch` et `/unwatch` sont réservées aux membres qui peuvent gérer le serveur.
+Commands that change the server's configuration are restricted to members who can manage the server.
 
-## Deux façons de l'utiliser
+## Two ways to use it
 
-| | Webhook seul | Bot complet |
+| | Webhook only | Full bot |
 |---|---|---|
-| Mise en route | ~30 s, aucun jeton | création d'une application Discord |
-| Alertes entrées/sorties | ✅ | ✅ |
-| Commandes `/best`, `/wallet`… | ❌ | ✅ |
-| Lancement | `./start_webhook.sh` | `./start_mac_linux.sh` |
+| Setup | ~30 s, no token | create a Discord application |
+| Entry/exit alerts | ✅ | ✅ |
+| Commands `/best`, `/wallet`… | ❌ | ✅ |
+| Start | `./start_webhook.sh` | `./start_mac_linux.sh` |
 
-### Version webhook (la plus simple)
+### Webhook version (the simplest)
 
-Un webhook ne sait qu'**envoyer** des messages — ce qui suffit pour les alertes.
+A webhook can only **send** messages, which is enough for alerts.
 
-1. Discord → **Paramètres du serveur** → **Intégrations** → **Webhooks** → *Nouveau webhook*
-2. Choisis le salon, puis **Copier l'URL du webhook**
-3. Colle-la dans un fichier `webhook.txt` à côté des scripts (il est gitignoré)
+1. Discord → **Server Settings** → **Integrations** → **Webhooks** → *New Webhook*
+2. Pick the channel, then **Copy Webhook URL**
+3. Paste it into a `webhook.txt` file next to the scripts (it is gitignored), or set `DISCORD_WEBHOOK_URL`
 4. `./start_webhook.sh`
 
-Cette URL permet de publier dans ton salon : garde-la pour toi.
+Anyone with this URL can post in your channel: keep it private.
 
-## Mise en route du bot complet
+## Setting up the full bot
 
-1. **Créer le bot** sur <https://discord.com/developers/applications> → *New Application* → onglet *Bot* → *Reset Token* → copier le jeton.
-2. **Coller le jeton** dans un fichier `token.txt` à côté de `bot.py` (une seule ligne).
-   Ne le partage avec personne : il donne le contrôle total du bot.
-3. **Inviter le bot** : onglet *OAuth2 → URL Generator*, cocher `bot` + `applications.commands`,
-   permissions `Send Messages` et `Embed Links`, puis ouvrir l'URL générée.
-4. **Lancer** :
+1. **Create the bot** at <https://discord.com/developers/applications> → *New Application* → *Bot* tab → *Reset Token* → copy the token.
+2. **Paste the token** into a `token.txt` file next to `bot.py` (a single line).
+   Never share it: it gives full control over the bot.
+3. **Invite the bot**: *OAuth2 → URL Generator* tab, tick `bot` + `applications.commands`,
+   permissions `Send Messages` and `Embed Links`, then open the generated URL.
+4. **Start it**:
 
 ```bash
 ./start_mac_linux.sh
 ```
 
-Aucun *privileged intent* n'est nécessaire : le bot ne lit pas les messages.
+No *privileged intent* is needed: the bot never reads messages.
 
-## Réglages (variables d'environnement, toutes optionnelles)
+## Settings (environment variables, all optional)
 
-| Variable | Défaut | Rôle |
+| Variable | Default | Role |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | — | Alternative à `token.txt` |
-| `DISCORD_GUILD_ID` | — | Ton serveur : les commandes apparaissent tout de suite au lieu de ~1 h |
-| `POLL_MINUTES` | `20` | Fréquence de vérification |
-| `PRESET_SIZE` | `40` | Nombre de traders suivis (top hebdo) |
+| `DISCORD_BOT_TOKEN` | — | Alternative to `token.txt` |
+| `DISCORD_GUILD_ID` | — | Your server: commands show up immediately instead of after ~1 h |
+| `POLL_MINUTES` | `2` | How often positions are checked |
+| `PRESET_SIZE` | `50` | Number of traders followed (weekly top) |
 
-## Ce qu'il faut savoir
+## Good to know
 
-- **Le premier cycle ne déclenche aucune alerte** : il sert de photo de référence, sinon tu recevrais
-  200 messages d'un coup. Les alertes commencent au cycle suivant.
-- **Maximum 5 alertes par cycle et par salon**, pour que ce soit lisible.
-- **Il doit tourner en permanence** pour surveiller. Sur ton Mac il s'arrête quand tu l'éteins :
-  pour du 24/7, héberge-le (Railway, Fly.io, un petit VPS…).
-- L'historique de l'API Polymarket plafonne à 500 événements par wallet, soit ~2 jours chez les gros
-  traders : les palmarès sont calculés sur cette fenêtre, pas sur toute leur carrière.
-- Le moteur se teste sans Discord : `./venv/bin/python overlap.py` affiche les meilleures entrées
-  dans le terminal.
+- **The first cycle never sends alerts**: it is the baseline snapshot, otherwise you would get
+  hundreds of messages at once. Alerts start from the next cycle.
+- **At most 5 alerts per cycle and per channel**, to keep things readable.
+- **A leaderboard reshuffle is not an exit**: only traders present in two consecutive cycles are
+  compared, so a trader dropping out of the top 50 doesn't trigger fake exits.
+- **It must run continuously** to monitor anything. For 24/7 operation, host it
+  (Railway, Fly.io, a small VPS…).
+- The Polymarket API caps history at 500 events per wallet, about 2 days for large
+  traders: track records are computed over that window, not over their whole career.
+- The engine can be tested without Discord: `./venv/bin/python overlap.py` prints the best entries
+  in the terminal.
 
-Pas un conseil financier. Ne mise que ce que tu peux perdre.
+Not financial advice. Only bet what you can afford to lose.
 
-## Licence
+## License
 
 [MIT](LICENSE)
